@@ -2,8 +2,11 @@
 # Generate a key and its digest with: routeforge keygen
 tenants:
   - name: demo
+    # This digest matches no key, so the example authenticates nobody until you
+    # replace it with the digest printed by `routeforge keygen`. The public demo key
+    # in fake.yaml must never be used with real provider credentials.
     api_key_sha256:
-      - 886ec24d8618d51171c94b1352ac7b95b4e82b97a5d2bff15045161351caa052
+      - 0000000000000000000000000000000000000000000000000000000000000000
     allow_strategy_override: true
 
 providers:

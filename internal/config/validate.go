@@ -117,11 +117,11 @@ func validateFake(base string, f Fake, add addFunc) {
 		{"disconnect_rate", f.DisconnectRate},
 		{"omit_usage_rate", f.OmitUsageRate},
 	} {
-		if r.v < 0 || r.v > 1 {
+		if !(r.v >= 0 && r.v <= 1) {
 			add(base+"."+r.path, "must be between 0 and 1")
 		}
 	}
-	if f.Jitter < 0 || f.Jitter >= 1 {
+	if !(f.Jitter >= 0 && f.Jitter < 1) {
 		add(base+".jitter", "must be in [0, 1)")
 	}
 	if f.OutputTokens < 1 {

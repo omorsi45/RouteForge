@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"math"
 	"strings"
 	"testing"
 
@@ -60,6 +61,10 @@ func TestValidateRejects(t *testing.T) {
 		{"bad max tokens param", addProvider(config.Provider{Name: "oa", Type: "openai", MaxTokensParam: "limit"}), "providers[1].max_tokens_param: must be one of max_completion_tokens, max_tokens"},
 		{"fake rate", func(c *config.Config) { c.Providers[0].Fake.ErrorRate = 1.5 }, "providers[0].fake.error_rate: must be between 0 and 1"},
 		{"fake jitter", func(c *config.Config) { c.Providers[0].Fake.Jitter = 1 }, "providers[0].fake.jitter: must be in [0, 1)"},
+		{"fake rate nan", func(c *config.Config) { c.Providers[0].Fake.ErrorRate = math.NaN() }, "providers[0].fake.error_rate: must be between 0 and 1"},
+		{"fake disconnect rate nan", func(c *config.Config) { c.Providers[0].Fake.DisconnectRate = math.NaN() }, "providers[0].fake.disconnect_rate: must be between 0 and 1"},
+		{"fake omit usage rate nan", func(c *config.Config) { c.Providers[0].Fake.OmitUsageRate = math.NaN() }, "providers[0].fake.omit_usage_rate: must be between 0 and 1"},
+		{"fake jitter nan", func(c *config.Config) { c.Providers[0].Fake.Jitter = math.NaN() }, "providers[0].fake.jitter: must be in [0, 1)"},
 		{"fake output tokens", func(c *config.Config) { c.Providers[0].Fake.OutputTokens = -1 }, "providers[0].fake.output_tokens: must be at least 1"},
 		{"fake disconnect after", func(c *config.Config) { c.Providers[0].Fake.DisconnectAfter = -1 }, "providers[0].fake.disconnect_after: must be at least 1"},
 		{"fake negative ttft", func(c *config.Config) { c.Providers[0].Fake.TTFT = -1 }, "providers[0].fake.ttft: must not be negative"},

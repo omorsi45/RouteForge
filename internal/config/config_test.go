@@ -148,3 +148,14 @@ func TestTenantAllows(t *testing.T) {
 		t.Error("limited tenant allow mismatch")
 	}
 }
+
+func TestParseRejectsNaNJitter(t *testing.T) {
+	doc := strings.Replace(minimalDoc, "    type: fake\n", "    type: fake\n    fake:\n      jitter: .nan\n", 1)
+	_, err := config.Parse([]byte(doc))
+	if err == nil {
+		t.Fatal("expected error for jitter: .nan")
+	}
+	if want := "providers[0].fake.jitter: must be in [0, 1)"; !strings.Contains(err.Error(), want) {
+		t.Fatalf("error %q does not contain %q", err, want)
+	}
+}
