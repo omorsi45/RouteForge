@@ -58,12 +58,14 @@ func serve(ctx context.Context, cfg *config.Config, ln net.Listener, getenv func
 	// The parent ctx is already canceled, so the drain gets its own bound.
 	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cfg.Server.ShutdownTimeout)
 	defer cancel()
-	shutdownErr := srv.Shutdown(shutdownCtx)
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		logger.Warn("shutdown did not drain cleanly", "error", err)
+	}
 	if err := <-serveErr; !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 	logger.Info("stopped")
-	return shutdownErr
+	return nil
 }
 
 // cmdServe loads --config and runs the gateway until ctx ends. It returns the
