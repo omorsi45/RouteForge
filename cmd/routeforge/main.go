@@ -37,21 +37,22 @@ func main() {
 // run dispatches a subcommand and returns the process exit code. args
 // excludes the program name.
 func run(ctx context.Context, args []string, stdout, stderr io.Writer, getenv func(string) string) int {
-	_ = ctx
-	_ = getenv
-
 	if len(args) == 0 {
 		fmt.Fprint(stderr, usageText)
 		return 2
 	}
 
 	switch args[0] {
+	case "serve":
+		return cmdServe(ctx, args[1:], stdout, stderr, getenv)
 	case "version":
 		return cmdVersion(stdout)
 	case "validate-config":
 		return cmdValidateConfig(args[1:], stdout, stderr)
 	case "keygen":
 		return cmdKeygen(stdout, rand.Reader)
+	case "healthcheck":
+		return cmdHealthcheck(ctx, args[1:], stdout, stderr)
 	case "help":
 		fmt.Fprint(stdout, usageText)
 		return 0
