@@ -59,7 +59,7 @@ func (s *stream) Recv() (provider.StreamEvent, error) {
 			return provider.StreamEvent{}, s.err
 		}
 		var env envelope
-		if err := decodeJSON([]byte(ev.Data), &env); err != nil {
+		if err := provider.DecodeJSON([]byte(ev.Data), &env); err != nil {
 			s.err = s.undecodable(err)
 			return provider.StreamEvent{}, s.err
 		}
@@ -135,7 +135,7 @@ func decodeDelta(raw json.RawMessage, v any) error {
 	if len(raw) == 0 {
 		return nil
 	}
-	return decodeJSON(raw, v)
+	return provider.DecodeJSON(raw, v)
 }
 
 // readError converts an SSEReader error into a provider error.

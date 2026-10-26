@@ -101,7 +101,7 @@ func newProvider(srv *httptest.Server, key string) *anthropic.Provider {
 
 func baseRequest() provider.Request {
 	return provider.Request{
-		Model:     "claude-test",
+		Model:     "anthropic-model-test",
 		Messages:  []provider.Message{{Role: provider.RoleUser, Content: "hi"}},
 		MaxTokens: 64,
 	}
@@ -133,7 +133,7 @@ func TestCompleteRequestMapping(t *testing.T) {
 	srv, caps := serve(t, 200, map[string]string{"Content-Type": "application/json"}, "message_ok.json")
 	p := newProvider(srv, testKey)
 	req := provider.Request{
-		Model: "claude-test",
+		Model: "anthropic-model-test",
 		Messages: []provider.Message{
 			{Role: provider.RoleSystem, Content: "be brief"},
 			{Role: provider.RoleUser, Content: "hi"},
@@ -170,7 +170,7 @@ func TestCompleteRequestMapping(t *testing.T) {
 		t.Fatalf("Accept = %q", v)
 	}
 	var want map[string]any
-	wantJSON := `{"model":"claude-test","max_tokens":64,"system":"be brief\n\nuse English","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"ok"},{"role":"user","content":"go"}],"temperature":0.2,"top_p":0.9,"stop_sequences":["END"],"metadata":{"user_id":"u-1"},"stream":false}`
+	wantJSON := `{"model":"anthropic-model-test","max_tokens":64,"system":"be brief\n\nuse English","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"ok"},{"role":"user","content":"go"}],"temperature":0.2,"top_p":0.9,"stop_sequences":["END"],"metadata":{"user_id":"u-1"},"stream":false}`
 	if err := json.Unmarshal([]byte(wantJSON), &want); err != nil {
 		t.Fatal(err)
 	}

@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -15,10 +14,7 @@ import (
 	"github.com/omorsi45/routeforge/internal/provider"
 )
 
-const (
-	maxErrorBodyBytes = 64 << 10
-	codeContextLength = "context_length_exceeded"
-)
+const codeContextLength = "context_length_exceeded"
 
 // Options configures a Provider.
 type Options struct {
@@ -107,7 +103,7 @@ func (p *Provider) Complete(ctx context.Context, req provider.Request) (*provide
 		return nil, provider.TransportError(ctx, p.name, err)
 	}
 	var wr wireResponse
-	if err := decodeJSON(body, &wr); err != nil {
+	if err := provider.DecodeJSON(body, &wr); err != nil {
 		return nil, p.internal("undecodable response", err)
 	}
 	if len(wr.Choices) == 0 {
@@ -208,7 +204,7 @@ func (p *Provider) statusError(ctx context.Context, resp *http.Response) error {
 	kind := provider.KindFromStatus(resp.StatusCode)
 	msg := http.StatusText(resp.StatusCode)
 
-	raw, err := provider.ReadAllLimited(resp.Body, maxErrorBodyBytes)
+	raw, err := provider.ReadAllLimited(resp.Body, provider.MaxErrorBodyBytes)
 	if err != nil && ctx.Err() != nil {
 		return provider.TransportError(ctx, p.name, err)
 	}
@@ -216,7 +212,7 @@ func (p *Provider) statusError(ctx context.Context, resp *http.Response) error {
 		var env struct {
 			Error *wireError `json:"error"`
 		}
-		if decodeJSON(raw, &env) == nil && env.Error != nil && env.Error.Message != "" {
+		if provider.DecodeJSON(raw, &env) == nil && env.Error != nil && env.Error.Message != "" {
 			msg = provider.Redact(env.Error.Message, p.apiKey)
 			if isContextLength(env.Error.Code) {
 				kind = provider.KindContextLength
@@ -251,16 +247,4 @@ func normalizeFinish(fr *string) string {
 		}
 	}
 	return "stop"
-}
-
-// decodeJSON decodes exactly one JSON value from b, rejecting trailing data.
-func decodeJSON(b []byte, v any) error {
-	dec := json.NewDecoder(bytes.NewReader(b))
-	if err := dec.Decode(v); err != nil {
-		return err
-	}
-	if _, err := dec.Token(); err != io.EOF {
-		return errors.New("trailing data after JSON value")
-	}
-	return nil
 }

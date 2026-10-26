@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -18,10 +17,7 @@ import (
 // APIVersion is the anthropic-version header value sent with every request.
 const APIVersion = "2023-06-01"
 
-const (
-	maxErrorBodyBytes = 64 << 10
-	defaultMaxTokens  = 4096 // max_tokens is required by the API
-)
+const defaultMaxTokens = 4096 // max_tokens is required by the API
 
 // Options configures a Provider.
 type Options struct {
@@ -124,7 +120,7 @@ func (p *Provider) Complete(ctx context.Context, req provider.Request) (*provide
 		return nil, provider.TransportError(ctx, p.name, err)
 	}
 	var wr wireResponse
-	if err := decodeJSON(body, &wr); err != nil {
+	if err := provider.DecodeJSON(body, &wr); err != nil {
 		return nil, p.internal("undecodable response", err)
 	}
 	var text strings.Builder
@@ -238,7 +234,7 @@ func (p *Provider) statusError(ctx context.Context, resp *http.Response) error {
 	kind := provider.KindFromStatus(resp.StatusCode)
 	msg := http.StatusText(resp.StatusCode)
 
-	raw, err := provider.ReadAllLimited(resp.Body, maxErrorBodyBytes)
+	raw, err := provider.ReadAllLimited(resp.Body, provider.MaxErrorBodyBytes)
 	if err != nil && ctx.Err() != nil {
 		return provider.TransportError(ctx, p.name, err)
 	}
@@ -246,7 +242,7 @@ func (p *Provider) statusError(ctx context.Context, resp *http.Response) error {
 		var env struct {
 			Error *apiError `json:"error"`
 		}
-		if decodeJSON(raw, &env) == nil && env.Error != nil {
+		if provider.DecodeJSON(raw, &env) == nil && env.Error != nil {
 			if k, ok := kindForType(env.Error.Type, env.Error.Message); ok {
 				kind = k
 			}
@@ -300,16 +296,4 @@ func mapStop(reason string) string {
 		return "content_filter"
 	}
 	return "stop" // end_turn, stop_sequence, absent and unknown reasons
-}
-
-// decodeJSON decodes exactly one JSON value from b, rejecting trailing data.
-func decodeJSON(b []byte, v any) error {
-	dec := json.NewDecoder(bytes.NewReader(b))
-	if err := dec.Decode(v); err != nil {
-		return err
-	}
-	if _, err := dec.Token(); err != io.EOF {
-		return errors.New("trailing data after JSON value")
-	}
-	return nil
 }
