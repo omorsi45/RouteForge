@@ -1,0 +1,31 @@
+# Isolated development worktrees
+.worktrees/
+
+# Build output
+/bin/
+/routeforge
+/routeforge-bench
+*.test
+*.out
+coverage.*
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Raw third-party data and derived replay files (licenses do not allow redistribution)
+/data/raw/
+/data/work/
+/trainer/artifacts/replay/
+
+# Local environment and secrets
+.env
+.env.*
+*.local.yaml
+
+# OS noise
+.DS_Store
