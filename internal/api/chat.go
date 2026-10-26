@@ -158,7 +158,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		clientCtx:    r.Context(),
 	}
 	if req.Stream {
-		writeError(w, invalid("streaming not implemented"))
+		s.serveStream(w, r, st, preq)
 		return
 	}
 	s.serveJSON(w, r, st, preq)
