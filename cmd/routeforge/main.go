@@ -47,6 +47,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, getenv fu
 	switch args[0] {
 	case "version":
 		return cmdVersion(stdout)
+	case "validate-config":
+		return cmdValidateConfig(args[1:], stdout, stderr)
 	case "help":
 		fmt.Fprint(stdout, usageText)
 		return 0

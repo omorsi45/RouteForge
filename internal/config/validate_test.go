@@ -1,0 +1,105 @@
+package config_test
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/omorsi45/routeforge/internal/config"
+)
+
+func valid(t *testing.T) *config.Config {
+	t.Helper()
+	c, err := config.Load("testdata/minimal.yaml")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	return c
+}
+
+func TestValidateAcceptsMinimal(t *testing.T) {
+	if err := valid(t).Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+}
+
+func TestValidateRejects(t *testing.T) {
+	addProvider := func(p config.Provider) func(*config.Config) {
+		return func(c *config.Config) {
+			c.Providers = append(c.Providers, p)
+			c.ApplyDefaults()
+		}
+	}
+	tests := []struct {
+		name   string
+		mutate func(*config.Config)
+		want   string
+	}{
+		{"no tenants", func(c *config.Config) { c.Tenants = nil }, "tenants: at least one tenant is required"},
+		{"no providers", func(c *config.Config) { c.Providers = nil }, "providers: at least one provider is required"},
+		{"no models", func(c *config.Config) { c.Models = nil }, "models: at least one model is required"},
+		{"bad tenant name", func(c *config.Config) { c.Tenants[0].Name = "Bad Name" }, "tenants[0].name: must match"},
+		{"bad hex", func(c *config.Config) { c.Tenants[0].APIKeySHA256 = []string{"ABC"} }, "tenants[0].api_key_sha256[0]: must be 64 lowercase hex characters"},
+		{"no digests", func(c *config.Config) { c.Tenants[0].APIKeySHA256 = nil }, "tenants[0].api_key_sha256: at least one digest is required"},
+		{"dup tenant name", func(c *config.Config) {
+			c.Tenants = append(c.Tenants, config.Tenant{Name: "tenant-a", APIKeySHA256: []string{strings.Repeat("b", 64)}})
+			c.ApplyDefaults()
+		}, "tenants[1].name: duplicates tenants[0]"},
+		{"dup digest", func(c *config.Config) {
+			c.Tenants = append(c.Tenants, config.Tenant{Name: "tenant-b", APIKeySHA256: []string{c.Tenants[0].APIKeySHA256[0]}})
+			c.ApplyDefaults()
+		}, "duplicates tenants[0].api_key_sha256[0]"},
+		{"bad profile", func(c *config.Config) { c.Tenants[0].Profile = "fast" }, `tenants[0].profile: must be one of strict, balanced, economy`},
+		{"zero tenant deadline", func(c *config.Config) { c.Tenants[0].MaxDeadline = -1 }, "tenants[0].max_deadline: must be positive"},
+		{"zero tenant tokens", func(c *config.Config) { c.Tenants[0].MaxOutputTokens = -1 }, "tenants[0].max_output_tokens: must be positive"},
+		{"unknown allowed model", func(c *config.Config) { c.Tenants[0].AllowedModels = []string{"nope"} }, `tenants[0].allowed_models[0]: unknown model "nope"`},
+		{"bad provider type", func(c *config.Config) { c.Providers[0].Type = "bedrock" }, `providers[0].type: must be one of openai, anthropic, fake`},
+		{"bad provider name", func(c *config.Config) { c.Providers[0].Name = "UP" }, "providers[0].name: must match"},
+		{"anthropic needs key env", addProvider(config.Provider{Name: "anth", Type: "anthropic", BaseURL: "https://api.anthropic.com"}), "providers[1].api_key_env: required for anthropic"},
+		{"bad env name", addProvider(config.Provider{Name: "oa", Type: "openai", APIKeyEnv: "openai-key"}), "providers[1].api_key_env: must match ^[A-Z_][A-Z0-9_]*$"},
+		{"bad base url", addProvider(config.Provider{Name: "oa", Type: "openai", BaseURL: "ftp://x"}), "providers[1].base_url: must be an absolute http or https URL"},
+		{"bad max tokens param", addProvider(config.Provider{Name: "oa", Type: "openai", MaxTokensParam: "limit"}), "providers[1].max_tokens_param: must be one of max_completion_tokens, max_tokens"},
+		{"fake rate", func(c *config.Config) { c.Providers[0].Fake.ErrorRate = 1.5 }, "providers[0].fake.error_rate: must be between 0 and 1"},
+		{"fake jitter", func(c *config.Config) { c.Providers[0].Fake.Jitter = 1 }, "providers[0].fake.jitter: must be in [0, 1)"},
+		{"fake output tokens", func(c *config.Config) { c.Providers[0].Fake.OutputTokens = -1 }, "providers[0].fake.output_tokens: must be at least 1"},
+		{"fake disconnect after", func(c *config.Config) { c.Providers[0].Fake.DisconnectAfter = -1 }, "providers[0].fake.disconnect_after: must be at least 1"},
+		{"fake negative ttft", func(c *config.Config) { c.Providers[0].Fake.TTFT = -1 }, "providers[0].fake.ttft: must not be negative"},
+		{"fake kind", func(c *config.Config) { c.Providers[0].Fake.ErrorKind = "boom" }, `providers[0].fake.error_kind: unknown kind "boom"`},
+		{"reserved model name", func(c *config.Config) { c.Models[0].Name = "routeforge-auto" }, "models[0].name: routeforge-auto is reserved"},
+		{"bad model name", func(c *config.Config) { c.Models[0].Name = "-x" }, "models[0].name: must match"},
+		{"dup model name", func(c *config.Config) { c.Models[1].Name = c.Models[0].Name }, "models[1].name: duplicates models[0]"},
+		{"model unknown provider", func(c *config.Config) { c.Models[0].Provider = "ghost" }, `models[0].provider: unknown provider "ghost"`},
+		{"dup policy name", func(c *config.Config) { c.Models[1].PolicyName = c.Models[0].PolicyName }, `models[1].policy_name: duplicates models[0]`},
+		{"zero deadline", func(c *config.Config) { c.Server.DefaultDeadline = 0 }, "server.default_deadline: must be positive"},
+		{"empty listen", func(c *config.Config) { c.Server.Listen = "" }, "server.listen: must not be empty"},
+		{"zero body bytes", func(c *config.Config) { c.Server.MaxBodyBytes = 0 }, "server.max_body_bytes: must be positive"},
+		{"zero header bytes", func(c *config.Config) { c.Server.MaxHeaderBytes = 0 }, "server.max_header_bytes: must be positive"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := valid(t)
+			tc.mutate(c)
+			err := c.Validate()
+			if err == nil {
+				t.Fatal("Validate returned nil")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error %q does not contain %q", err.Error(), tc.want)
+			}
+		})
+	}
+}
+
+func TestValidateJoinsAllErrors(t *testing.T) {
+	c := valid(t)
+	c.Tenants[0].Profile = "fast"
+	c.Server.DefaultDeadline = 0
+	err := c.Validate()
+	if err == nil {
+		t.Fatal("Validate returned nil")
+	}
+	for _, want := range []string{"tenants[0].profile", "server.default_deadline"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q missing %q", err.Error(), want)
+		}
+	}
+}

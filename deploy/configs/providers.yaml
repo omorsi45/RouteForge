@@ -1,0 +1,31 @@
+# Example with real providers. Credentials come only from the named environment variables.
+# Generate a key and its digest with: routeforge keygen
+tenants:
+  - name: demo
+    api_key_sha256:
+      - 886ec24d8618d51171c94b1352ac7b95b4e82b97a5d2bff15045161351caa052
+    allow_strategy_override: true
+
+providers:
+  - name: openai
+    type: openai
+    api_key_env: OPENAI_API_KEY
+  - name: anthropic
+    type: anthropic
+    api_key_env: ANTHROPIC_API_KEY
+  - name: ollama
+    type: openai
+    base_url: http://localhost:11434/v1
+    max_tokens_param: max_tokens
+
+models:
+  - name: gpt-5
+    provider: openai
+    upstream_model: gpt-5
+    strongest: true
+  - name: claude-sonnet-4
+    provider: anthropic
+    upstream_model: claude-sonnet-4-20250514
+  - name: llama3.2
+    provider: ollama
+    upstream_model: llama3.2
