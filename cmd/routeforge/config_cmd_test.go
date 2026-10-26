@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/omorsi45/routeforge/internal/auth"
 	"github.com/omorsi45/routeforge/internal/config"
 )
 
@@ -70,4 +71,15 @@ func mustRead(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+func TestFakeExampleConfigDemoKey(t *testing.T) {
+	c, err := config.Load("../../deploy/configs/fake.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := auth.NewStore(c.Tenants).Lookup("rf_local_demo_only")
+	if !ok || got.Name != "demo" {
+		t.Fatalf("Lookup = %v, %v", got, ok)
+	}
 }

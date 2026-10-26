@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"io"
 	"os"
@@ -49,6 +50,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, getenv fu
 		return cmdVersion(stdout)
 	case "validate-config":
 		return cmdValidateConfig(args[1:], stdout, stderr)
+	case "keygen":
+		return cmdKeygen(stdout, rand.Reader)
 	case "help":
 		fmt.Fprint(stdout, usageText)
 		return 0
