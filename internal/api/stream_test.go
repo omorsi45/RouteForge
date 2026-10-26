@@ -465,3 +465,54 @@ func TestStreamClientDisconnectCancelsUpstream(t *testing.T) {
 		t.Fatal("server.Close hung: the handler did not return after the client left")
 	}
 }
+
+// cancelingStream delivers one event, then cancels the request context from
+// inside Recv and fails with context.Canceled, as a provider does when the
+// client leaves mid-stream.
+type cancelingStream struct {
+	cancel context.CancelFunc
+	sent   bool
+}
+
+func (s *cancelingStream) Recv() (provider.StreamEvent, error) {
+	if !s.sent {
+		s.sent = true
+		return provider.StreamEvent{Delta: "only"}, nil
+	}
+	s.cancel()
+	return provider.StreamEvent{}, context.Canceled
+}
+
+func (s *cancelingStream) Close() error { return nil }
+
+// A client that leaves after the response is committed gets no error event and
+// no [DONE]: nothing is written after the last delivered chunk.
+func TestStreamClientGoneMidStreamWritesNothing(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	st := &cancelingStream{cancel: cancel}
+	p := &stubProvider{stream: func(context.Context, provider.Request) (provider.Stream, error) {
+		return st, nil
+	}}
+	srv := newServer(t, testConfig(), map[string]provider.Provider{"p-strong": p})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(streamBody)).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer "+keyA)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body %s", rec.Code, rec.Body)
+	}
+	chunks, done, errEvent := readSSE(t, rec.Body.String())
+	if len(chunks) != 1 {
+		t.Errorf("got %d content chunks, want exactly 1: %s", len(chunks), rec.Body)
+	}
+	if errEvent != nil {
+		t.Errorf("error event written to a client that left: %v", errEvent)
+	}
+	if done {
+		t.Error("[DONE] written to a client that left")
+	}
+}

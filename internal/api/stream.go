@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -148,7 +147,7 @@ func (s *Server) serveStream(w http.ResponseWriter, r *http.Request, st *chatSta
 				}
 				return
 			}
-			s.writeStreamError(w, st, flush)
+			s.writeStreamError(w, st, err, flush)
 			return
 		}
 		frames, err := cw.encode(ev)
@@ -167,16 +166,18 @@ func (s *Server) serveStream(w http.ResponseWriter, r *http.Request, st *chatSta
 }
 
 // writeStreamError sends the terminal error event after the response has been
-// committed. A client that has left gets nothing.
-func (s *Server) writeStreamError(w http.ResponseWriter, st *chatState, flush func() bool) {
-	if st.clientCtx.Err() != nil {
+// committed. The failure is classified by chatState.failure, so a client that
+// has left (nil) gets nothing and a deadline outranks a cancellation.
+func (s *Server) writeStreamError(w http.ResponseWriter, st *chatState, err error, flush func() bool) {
+	aerr := st.failure(err)
+	if aerr == nil {
 		return
 	}
 	e := &Error{Status: http.StatusBadGateway, Code: CodeUpstreamStreamInterrupted, Message: "upstream stream interrupted"}
-	if errors.Is(st.deadlineCtx.Err(), context.DeadlineExceeded) {
+	if aerr.Code == CodeDeadlineExceeded {
 		e = &Error{Status: http.StatusGatewayTimeout, Code: CodeDeadlineExceeded, Message: "deadline exceeded"}
 	}
-	if _, err := w.Write(streamErrorEvent(e)); err == nil {
+	if _, werr := w.Write(streamErrorEvent(e)); werr == nil {
 		flush()
 	}
 }
