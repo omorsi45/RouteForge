@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -80,6 +81,30 @@ models:
 // for /readyz. stop cancels serve and returns its result.
 func startGateway(t *testing.T) (baseURL string, stop func() error) {
 	t.Helper()
+	return startGatewayWithLogger(t, slog.New(slog.DiscardHandler))
+}
+
+// syncBuffer is a bytes.Buffer safe for the gateway's goroutines to log into
+// while the test reads it.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func startGatewayWithLogger(t *testing.T, logger *slog.Logger) (baseURL string, stop func() error) {
+	t.Helper()
 	path := filepath.Join(t.TempDir(), "gateway.yaml")
 	if err := os.WriteFile(path, []byte(e2eConfigYAML()), 0o600); err != nil {
 		t.Fatal(err)
@@ -96,7 +121,7 @@ func startGateway(t *testing.T) (baseURL string, stop func() error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	errc := make(chan error, 1)
 	go func() {
-		errc <- serve(ctx, cfg, ln, func(string) string { return "" }, slog.New(slog.DiscardHandler))
+		errc <- serve(ctx, cfg, ln, func(string) string { return "" }, logger)
 	}()
 
 	var once sync.Once
@@ -436,7 +461,8 @@ func TestEndToEnd(t *testing.T) {
 }
 
 func TestServeGracefulShutdownDrains(t *testing.T) {
-	base, stop := startGateway(t)
+	var logs syncBuffer
+	base, stop := startGatewayWithLogger(t, slog.New(slog.NewJSONHandler(&logs, nil)))
 
 	type outcome struct {
 		status  int
@@ -471,8 +497,19 @@ func TestServeGracefulShutdownDrains(t *testing.T) {
 	}()
 
 	time.Sleep(50 * time.Millisecond)
+	// http.Server.Shutdown never kills an active connection, so the slow
+	// request completing proves nothing by itself. serve returning only after
+	// the request finished does: the slow fake's first token takes 300ms and
+	// the request started about 50ms before stop.
+	stopStart := time.Now()
 	if err := stop(); err != nil {
 		t.Fatalf("stop: %v", err)
+	}
+	if elapsed := time.Since(stopStart); elapsed < 200*time.Millisecond {
+		t.Errorf("serve returned %v after the shutdown signal, want at least 200ms spent draining the in-flight request", elapsed)
+	}
+	if strings.Contains(logs.String(), "shutdown did not drain cleanly") {
+		t.Errorf("serve logged a failed drain: %s", logs.String())
 	}
 
 	select {
