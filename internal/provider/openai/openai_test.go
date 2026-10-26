@@ -430,7 +430,7 @@ func TestStreamErrorChunkContextLengthAndRedaction(t *testing.T) {
 	}
 }
 
-func TestStreamBadChunkIsInternalAndSticky(t *testing.T) {
+func TestStreamBadChunkIsUnavailableAndSticky(t *testing.T) {
 	body := "data: {not json}\n\ndata: [DONE]\n\n"
 	srv, _ := serveBytes(t, 200, map[string]string{"Content-Type": "text/event-stream"}, []byte(body))
 	s, err := newProvider(srv, "", "max_tokens").Stream(context.Background(), baseRequest())
@@ -440,7 +440,31 @@ func TestStreamBadChunkIsInternalAndSticky(t *testing.T) {
 	defer s.Close()
 
 	_, err = s.Recv()
-	if pe := asProviderError(t, err); pe.Kind != provider.KindInternal {
+	if pe := asProviderError(t, err); pe.Kind != provider.KindUnavailable {
+		t.Fatalf("kind = %q", pe.Kind)
+	}
+	requireStickyError(t, s, err)
+}
+
+func TestStreamCutMidJSONIsUnavailableAndSticky(t *testing.T) {
+	body := `data: {"choices":[{"delta":{"content":"Hel"},"finish_reason":null}]}` + "\n\n" +
+		`data: {"choices":[{"delta":{"content":"He`
+	srv, _ := serveBytes(t, 200, map[string]string{"Content-Type": "text/event-stream"}, []byte(body))
+	s, err := newProvider(srv, "", "max_tokens").Stream(context.Background(), baseRequest())
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	defer s.Close()
+
+	ev, err := s.Recv()
+	if err != nil {
+		t.Fatalf("first Recv: %v", err)
+	}
+	if ev.Delta != "Hel" {
+		t.Fatalf("first event = %+v", ev)
+	}
+	_, err = s.Recv()
+	if pe := asProviderError(t, err); pe.Kind != provider.KindUnavailable {
 		t.Fatalf("kind = %q", pe.Kind)
 	}
 	requireStickyError(t, s, err)

@@ -89,7 +89,9 @@ func (s *stream) readError(err error) error {
 func (s *stream) parseChunk(data string) (provider.StreamEvent, error) {
 	var c wireChunk
 	if err := decodeJSON([]byte(data), &c); err != nil {
-		return provider.StreamEvent{}, &provider.Error{Kind: provider.KindInternal, Provider: s.name, Message: "undecodable stream chunk", Err: err}
+		// An undecodable chunk is an upstream fault (for example a stream cut
+		// mid-line), so it is retryable like any other interruption.
+		return provider.StreamEvent{}, &provider.Error{Kind: provider.KindUnavailable, Provider: s.name, Message: "undecodable stream chunk", Err: err}
 	}
 	if c.Error != nil {
 		kind := provider.KindUnavailable
