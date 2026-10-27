@@ -6,7 +6,7 @@ VENV := trainer/.venv
 VPY := $(VENV)/bin/python
 TRAIN := PYTHONPATH=trainer $(VPY) -m routeforge_train --root .
 
-.PHONY: check fmt-check vet build tidy-check validate-configs test test-race vuln py-setup py-check py-test data
+.PHONY: check fmt-check vet build tidy-check validate-configs test test-race vuln py-setup py-check py-test data train
 
 check: fmt-check vet build tidy-check validate-configs
 
@@ -47,3 +47,6 @@ py-test:
 
 data:
 	$(TRAIN) data
+
+train:
+	$(TRAIN) train

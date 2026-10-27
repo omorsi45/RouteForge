@@ -3,7 +3,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from routeforge_train import datacmd
+from routeforge_train import datacmd, train
 from routeforge_train.errors import TrainerError
 from routeforge_train.paths import Paths
 
@@ -16,6 +16,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--root", default=".", help="repository root (default: .)")
     subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
     datacmd.register(subparsers)
+    train.register(subparsers)
     return parser
 
 

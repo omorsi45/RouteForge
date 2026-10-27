@@ -209,6 +209,39 @@ def test_design_matrix_columns_and_global_feature():
     assert global_feature(9, vocab) == 262144 + 7
 
 
+@pytest.mark.parametrize("column", [-1, 10, 11])
+def test_global_feature_rejects_columns_outside_the_design_matrix(column):
+    with pytest.raises(ValueError, match=str(column)):
+        global_feature(column, np.array([5, 9], dtype=np.int64))
+
+
+def test_global_feature_accepts_first_and_last_column():
+    vocab = np.array([5, 9], dtype=np.int64)
+    assert global_feature(0, vocab) == 5
+    assert global_feature(9, vocab) == HASH_DIM + 7
+
+
+def test_design_matrix_rejects_wrong_dense_width():
+    hashed = sparse.csr_matrix((2, HASH_DIM), dtype=np.float64)
+    vocab = np.array([5], dtype=np.int64)
+    for width in (7, 9):
+        with pytest.raises(ValueError, match="dense"):
+            design_matrix(hashed, np.zeros((2, width)), vocab)
+
+
+def test_design_matrix_rejects_mismatched_row_count():
+    hashed = sparse.csr_matrix((2, HASH_DIM), dtype=np.float64)
+    vocab = np.array([5], dtype=np.int64)
+    with pytest.raises(ValueError, match="rows"):
+        design_matrix(hashed, np.zeros((3, 8)), vocab)
+
+
+def test_design_matrix_rejects_one_dimensional_dense_block():
+    hashed = sparse.csr_matrix((2, HASH_DIM), dtype=np.float64)
+    with pytest.raises(ValueError, match="dense"):
+        design_matrix(hashed, np.zeros(16), np.array([5], dtype=np.int64))
+
+
 def test_prompt_sha256():
     assert (
         prompt_sha256("abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"

@@ -177,6 +177,13 @@ def design_matrix(
     hashed: sparse.csr_matrix, dense_z: np.ndarray, vocab: np.ndarray
 ) -> sparse.csr_matrix:
     """Columns `[hashed[:, vocab] | dense_z]`."""
+    n_dense = len(DENSE_NAMES)
+    if dense_z.ndim != 2 or dense_z.shape[1] != n_dense:
+        raise ValueError(f"dense block has shape {dense_z.shape}, expected (rows, {n_dense})")
+    if dense_z.shape[0] != hashed.shape[0]:
+        raise ValueError(
+            f"dense block has {dense_z.shape[0]} rows, hashed block has {hashed.shape[0]}"
+        )
     return sparse.hstack(
         [hashed[:, vocab], sparse.csr_matrix(dense_z)], format="csr", dtype=np.float64
     )
@@ -184,6 +191,9 @@ def design_matrix(
 
 def global_feature(column: int, vocab: np.ndarray) -> int:
     """Map a compact design-matrix column to its global feature id."""
+    width = len(vocab) + len(DENSE_NAMES)
+    if not 0 <= column < width:
+        raise ValueError(f"column {column} is outside the design matrix of {width} columns")
     if column < len(vocab):
         return int(vocab[column])
     return HASH_DIM + column - len(vocab)

@@ -25,6 +25,7 @@ SYNTH_PRICES = {
     "m-cheap": Price(0.1, 0.4),
 }
 SYNTH_NOW = datetime(2026, 10, 26, 12, 0, 0, tzinfo=UTC)
+FIXED_NOW = datetime(2026, 10, 26, tzinfo=UTC)
 SYNTH_SOURCE = {
     "dataset": "synthetic",
     "revision": "synthetic",

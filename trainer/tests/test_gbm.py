@@ -73,6 +73,14 @@ def test_fit_gbm_is_deterministic():
     assert fit_gbm(p.design, p.y, p.vocab).to_json() == fit_gbm(p.design, p.y, p.vocab).to_json()
 
 
+def test_fit_gbm_rejects_design_width_that_does_not_match_the_vocabulary():
+    p = make_problem()
+    with pytest.raises(ValueError, match="design matrix"):
+        fit_gbm(p.design, p.y, p.vocab[:-1])
+    with pytest.raises(ValueError, match="design matrix"):
+        fit_gbm(p.design[:, :-1], p.y, p.vocab)
+
+
 def test_fit_gbm_rejects_single_class_labels():
     p = make_problem()
     with pytest.raises(ValueError, match="single class"):

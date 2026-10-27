@@ -1,12 +1,14 @@
 import os
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
 from routeforge_train.errors import TrainerError
 from routeforge_train.jsonio import FileInfo, file_info, sha256_file
 from routeforge_train.outcomes import OutcomeRow, read_outcomes, write_outcomes
+from routeforge_train.paths import Paths
 
 SEED = 20261026
 SPLIT_NAMES = ("train", "calibration", "certification", "test")
@@ -20,6 +22,10 @@ class HeldOutSplitAccessError(TrainerError):
 
 class HeldOutSplitChangedError(TrainerError):
     """The held-out test split on disk differs from what was expected."""
+
+
+class SplitChecksumError(TrainerError):
+    """A development split file differs from the checksum the manifest recorded."""
 
 
 def assign_splits(dataset_of: Mapping[str, str], seed: int = SEED) -> dict[str, str]:
@@ -96,6 +102,28 @@ def read_split(splits_dir: Path, name: str) -> Iterator[OutcomeRow]:
     if name not in SPLIT_NAMES:
         raise ValueError(f"unknown split {name!r}")
     return read_outcomes(split_path(splits_dir, name))
+
+
+def read_verified_split(
+    paths: Paths, manifest: Mapping[str, Any], name: str
+) -> Iterator[OutcomeRow]:
+    """Rows of a development split, after checking the file against the manifest checksum."""
+    rows = read_split(paths.splits_dir, name)
+    path = split_path(paths.splits_dir, name)
+    entry = manifest.get("files", {}).get(name)
+    expected = entry.get("sha256") if isinstance(entry, Mapping) else None
+    if not isinstance(expected, str):
+        raise SplitChecksumError(f"{path}: the manifest records no sha256 for the {name} split")
+    try:
+        actual = sha256_file(path)
+    except OSError as exc:
+        raise SplitChecksumError(f"{path}: cannot read the {name} split: {exc}") from exc
+    if actual != expected:
+        raise SplitChecksumError(
+            f"{path}: {name} split sha256 {actual} does not match the manifest {expected}; "
+            "rerun the data command"
+        )
+    return rows
 
 
 def read_test_split(splits_dir: Path, expected_sha256: str) -> Iterator[OutcomeRow]:

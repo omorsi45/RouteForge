@@ -7,15 +7,18 @@ import pytest
 from routeforge_train.errors import TrainerError
 from routeforge_train.jsonio import sha256_file
 from routeforge_train.outcomes import read_outcomes
+from routeforge_train.paths import Paths
 from routeforge_train.splits import (
     SEED,
     SPLIT_NAMES,
     SPLIT_PERCENT,
     HeldOutSplitAccessError,
     HeldOutSplitChangedError,
+    SplitChecksumError,
     assign_splits,
     read_split,
     read_test_split,
+    read_verified_split,
     split_path,
     write_splits,
 )
@@ -147,6 +150,47 @@ def test_write_splits_refuses_to_change_existing_test_split(tmp_path):
 def test_held_out_errors_are_trainer_errors():
     assert issubclass(HeldOutSplitAccessError, TrainerError)
     assert issubclass(HeldOutSplitChangedError, TrainerError)
+    assert issubclass(SplitChecksumError, TrainerError)
+
+
+def _verified_project(tmp_path):
+    rows, assignment = small_rows()
+    paths = Paths(tmp_path)
+    infos = write_splits(rows, assignment, paths.splits_dir, tmp_path)
+    manifest = {"files": {name: info.to_json() for name, info in infos.items()}}
+    return paths, manifest
+
+
+def test_read_verified_split_returns_rows_when_checksum_matches(tmp_path):
+    paths, manifest = _verified_project(tmp_path)
+    got = list(read_verified_split(paths, manifest, "calibration"))
+    assert got == list(read_split(paths.splits_dir, "calibration"))
+    assert len(got) == manifest["files"]["calibration"]["rows"]
+
+
+def test_read_verified_split_rejects_changed_file_and_names_the_split(tmp_path):
+    paths, manifest = _verified_project(tmp_path)
+    with open(split_path(paths.splits_dir, "calibration"), "ab") as f:
+        f.write(b"\n")
+    with pytest.raises(SplitChecksumError, match="calibration"):
+        read_verified_split(paths, manifest, "calibration")
+    assert list(read_verified_split(paths, manifest, "train"))
+
+
+def test_read_verified_split_rejects_missing_file_and_missing_manifest_entry(tmp_path):
+    paths, manifest = _verified_project(tmp_path)
+    split_path(paths.splits_dir, "train").unlink()
+    with pytest.raises(SplitChecksumError, match="train"):
+        read_verified_split(paths, manifest, "train")
+    del manifest["files"]["certification"]
+    with pytest.raises(SplitChecksumError, match="certification"):
+        read_verified_split(paths, manifest, "certification")
+
+
+def test_read_verified_split_still_refuses_the_test_split(tmp_path):
+    paths, manifest = _verified_project(tmp_path)
+    with pytest.raises(HeldOutSplitAccessError):
+        read_verified_split(paths, manifest, "test")
 
 
 def test_only_evaluate_reads_test_split():

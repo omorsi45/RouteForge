@@ -14,7 +14,7 @@ from scipy.sparse import csr_matrix
 from scipy.special import expit
 from sklearn.ensemble import GradientBoostingClassifier
 
-from routeforge_train.features import HASH_DIM, global_feature
+from routeforge_train.features import DENSE_NAMES, HASH_DIM, global_feature
 
 GBM_PARAMS = {
     "n_estimators": 200,
@@ -122,6 +122,9 @@ def _export_tree(tree_, vocab: np.ndarray) -> Tree:
 def fit_gbm(X: csr_matrix, y: np.ndarray, vocab: np.ndarray) -> GBMModel:
     if len(np.unique(y)) < 2:
         raise ValueError("training labels have a single class")
+    n_dense = len(DENSE_NAMES)
+    if X.shape[1] != len(vocab) + n_dense:
+        raise ValueError(f"design matrix has {X.shape[1]} columns, expected {len(vocab) + n_dense}")
     clf = GradientBoostingClassifier(**GBM_PARAMS).fit(X, y)
     p1 = float(clf.init_.class_prior_[1])
     trees = tuple(
