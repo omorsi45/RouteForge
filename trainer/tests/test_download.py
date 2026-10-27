@@ -162,7 +162,7 @@ def test_fetch_refuses_below_2_gib_free(tmp_path):
         ["r/a.json"],
         tmp_path / "x",
         opener=opener,
-        free_bytes=lambda p: 2**31,
+        free_bytes=lambda p: 2**31 + 1,  # the floor plus room for the 1-byte member
     )
     assert (out / "r/a.json").read_bytes() == b"A"
     assert opener.calls == 1
@@ -475,4 +475,61 @@ def test_fetch_file_http_error_leaves_nothing(tmp_path):
             RemoteFile(url, 1, "0" * 64), tmp_path / "out.bin", opener=opener, free_bytes=plenty
         )
     assert url in str(info.value) and "503" in str(info.value)
+    assert leftovers(tmp_path) == []
+
+
+class TrackingStream(io.BytesIO):
+    """In-memory body that records how many bytes the consumer pulled from it."""
+
+    def __init__(self, data: bytes) -> None:
+        super().__init__(data)
+        self.bytes_read = 0
+
+    def read(self, size: int | None = -1) -> bytes:
+        chunk = super().read(size)
+        self.bytes_read += len(chunk)
+        return chunk
+
+
+def test_fetch_stops_reading_once_stream_exceeds_declared_size(tmp_path):
+    data = make_tar_gz({"r/a.json": b"A"})
+    body = data + b"\0" * (8 * 1024 * 1024)
+    stream = TrackingStream(body)
+    with pytest.raises(ChecksumMismatch):
+        fetch_archive_members(
+            remote_for(data),
+            ["r/a.json"],
+            tmp_path / "x",
+            opener=lambda url: stream,
+            free_bytes=plenty,
+        )
+    assert stream.bytes_read <= len(data) + download._CHUNK
+    assert leftovers(tmp_path) == []
+
+
+def test_fetch_stops_extracting_at_free_space_floor(tmp_path):
+    data = make_tar_gz({"r/a.json": b"A" * 100})
+    with pytest.raises(DownloadError) as info:
+        fetch_archive_members(
+            remote_for(data),
+            ["r/a.json"],
+            tmp_path / "x",
+            opener=opener_for(data),
+            free_bytes=lambda p: MIN_FREE_BYTES + 10,
+        )
+    assert not isinstance(info.value, ChecksumMismatch)
+    assert leftovers(tmp_path) == []
+
+
+def test_fetch_file_stops_reading_once_body_exceeds_declared_size(tmp_path):
+    body = b"hello bytes"
+    stream = TrackingStream(body + b"\0" * (8 * 1024 * 1024))
+    with pytest.raises(ChecksumMismatch):
+        fetch_file(
+            remote_for(body),
+            tmp_path / "out.bin",
+            opener=lambda url: stream,
+            free_bytes=plenty,
+        )
+    assert stream.bytes_read <= len(body) + download._CHUNK
     assert leftovers(tmp_path) == []

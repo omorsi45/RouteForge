@@ -63,17 +63,29 @@ def disk_free(path: Path) -> int:
 
 
 class _HashingReader:
-    """File-like wrapper that hashes and counts every byte read from `raw`."""
+    """File-like wrapper that hashes and counts every byte read from `raw`.
 
-    def __init__(self, raw: BinaryIO) -> None:
+    Reads past `remote.size` are refused as soon as one byte too many arrives, so a wrong
+    or hostile body cannot stream unbounded data before the checksum is compared.
+    """
+
+    def __init__(self, raw: BinaryIO, remote: RemoteFile) -> None:
         self._raw = raw
+        self._remote = remote
         self._digest = hashlib.sha256()
         self.count = 0
 
     def read(self, size: int = -1) -> bytes:
+        remaining = self._remote.size - self.count
+        if size < 0 or size > remaining + 1:
+            size = remaining + 1
         chunk = self._raw.read(size)
         self._digest.update(chunk)
         self.count += len(chunk)
+        if self.count > self._remote.size:
+            raise ChecksumMismatch(
+                f"{self._remote.url}: stream exceeds the expected {self._remote.size} bytes"
+            )
         return chunk
 
     def drain(self) -> None:
@@ -104,14 +116,14 @@ def fetch_archive_members(
     dest = Path(dest)
     if _is_verified(dest, remote, wanted):
         return dest
-    _require_space(remote, dest.parent, free_bytes)
+    free = _require_space(remote, dest.parent, free_bytes)
     open_stream = open_url if opener is None else opener
 
     staging = dest.parent / (dest.name + ".partial")
     _remove(staging)
     try:
         staging.mkdir(parents=True)
-        sizes = _stream_extract(remote, wanted, staging, open_stream)
+        sizes = _stream_extract(remote, wanted, staging, open_stream, free - MIN_FREE_BYTES)
         write_json(
             staging / _VERIFIED,
             {"url": remote.url, "sha256": remote.sha256, "size": remote.size, "members": sizes},
@@ -143,7 +155,7 @@ def fetch_file(
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
         with contextlib.closing(open_stream(remote.url)) as response, open(partial, "wb") as out:
-            reader = _HashingReader(response)
+            reader = _HashingReader(response, remote)
             for chunk in iter(lambda: reader.read(_CHUNK), b""):
                 out.write(chunk)
         _verify_stream(remote, reader)
@@ -162,13 +174,15 @@ def _check_member_name(remote: RemoteFile, name: str) -> None:
 
 def _require_space(
     remote: RemoteFile, parent: Path, free_bytes: Callable[[Path], int] | None
-) -> None:
+) -> int:
+    """Return the free bytes at `parent`, or raise when fewer than MIN_FREE_BYTES are free."""
     free = (disk_free if free_bytes is None else free_bytes)(parent)
     if free < MIN_FREE_BYTES:
         raise InsufficientSpace(
             f"{remote.url}: {free / 1024**3:.2f} GiB free at {parent}, "
             f"{MIN_FREE_BYTES / 1024**3:.1f} GiB required"
         )
+    return free
 
 
 def _is_verified(dest: Path, remote: RemoteFile, wanted: set[str]) -> bool:
@@ -187,11 +201,13 @@ def _is_verified(dest: Path, remote: RemoteFile, wanted: set[str]) -> bool:
 
 
 def _stream_extract(
-    remote: RemoteFile, wanted: set[str], staging: Path, open_stream: Opener
+    remote: RemoteFile, wanted: set[str], staging: Path, open_stream: Opener, budget: int
 ) -> dict[str, int]:
+    """Extract `wanted` into `staging`, writing at most `budget` bytes in total."""
     sizes: dict[str, int] = {}
+    extracted = 0
     with contextlib.closing(open_stream(remote.url)) as response:
-        reader = _HashingReader(response)
+        reader = _HashingReader(response, remote)
         with tarfile.open(fileobj=reader, mode="r|gz") as tar:
             for member in tar:
                 if member.name not in wanted:
@@ -206,7 +222,8 @@ def _stream_extract(
                 target = staging / member.name
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with source, open(target, "wb") as out:
-                    sizes[member.name] = _copy(source, out)
+                    sizes[member.name] = _copy(source, out, budget - extracted, remote)
+                extracted += sizes[member.name]
         reader.drain()
     _verify_stream(remote, reader)
     missing = sorted(wanted - sizes.keys())
@@ -215,9 +232,14 @@ def _stream_extract(
     return sizes
 
 
-def _copy(source: IO[bytes], out: IO[bytes]) -> int:
+def _copy(source: IO[bytes], out: IO[bytes], budget: int, remote: RemoteFile) -> int:
     written = 0
     while chunk := source.read(_CHUNK):
+        if written + len(chunk) > budget:
+            raise InsufficientSpace(
+                f"{remote.url}: extracting would leave less than "
+                f"{MIN_FREE_BYTES / 1024**3:.1f} GiB free"
+            )
         out.write(chunk)
         written += len(chunk)
     return written
