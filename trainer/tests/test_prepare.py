@@ -59,6 +59,7 @@ def test_coverage_keeps_complete_prompts_in_input_order():
         }
     }
     assert report.dropped_datasets == {} and report.non_pool_rows == 0
+    assert report.dropped_prompts == []
 
 
 def test_coverage_drops_prompt_missing_a_model():
@@ -67,6 +68,9 @@ def test_coverage_drops_prompt_missing_a_model():
     assert report.datasets["a"]["dropped"]["missing_model"] == 1
     assert report.datasets["a"]["prompts_kept"] == report.datasets["a"]["prompts_in"] - 1 == 2
     assert {r.prompt_id for r in report.kept} == {"a:1", "a:2"}
+    assert report.dropped_prompts == [
+        {"dataset": "a", "prompt_id": "a:3", "reason": "missing_model"}
+    ]
 
 
 def test_coverage_drops_prompt_mismatch():
@@ -74,6 +78,9 @@ def test_coverage_drops_prompt_mismatch():
     report = apply_coverage(rows, POOL)
     assert report.datasets["a"]["dropped"]["prompt_mismatch"] == 1
     assert {r.prompt_id for r in report.kept} == {"a:1"}
+    assert report.dropped_prompts == [
+        {"dataset": "a", "prompt_id": "a:2", "reason": "prompt_mismatch"}
+    ]
 
 
 def test_coverage_drops_duplicate_rows():
@@ -81,13 +88,38 @@ def test_coverage_drops_duplicate_rows():
     report = apply_coverage(rows, POOL)
     assert report.datasets["a"]["dropped"]["duplicate_row"] == 1
     assert {r.prompt_id for r in report.kept} == {"a:1"}
+    assert report.dropped_prompts == [
+        {"dataset": "a", "prompt_id": "a:2", "reason": "duplicate_row"}
+    ]
 
 
 def test_coverage_counts_each_dropped_prompt_once_in_reason_order():
     # a:1 is both missing m2 and duplicated on m1: counted as missing_model only.
     rows = [row("a:1", "m1"), row("a:1", "m1"), *full("a:2")]
-    dropped = apply_coverage(rows, POOL).datasets["a"]["dropped"]
+    report = apply_coverage(rows, POOL)
+    dropped = report.datasets["a"]["dropped"]
     assert dropped == {"missing_model": 1, "duplicate_row": 0, "prompt_mismatch": 0}
+    assert report.dropped_prompts == [
+        {"dataset": "a", "prompt_id": "a:1", "reason": "missing_model"}
+    ]
+
+
+def test_coverage_lists_dropped_prompts_sorted_by_dataset_then_prompt_id():
+    rows = (
+        [row("b:2", "m1", dataset="b")]
+        + [row("b:1", "m1", dataset="b"), row("b:1", "m2", dataset="b")]
+        + [row("a:9", "m1", "x"), row("a:9", "m2", "y")]
+        + [row("a:10", "m1"), row("a:10", "m1"), row("a:10", "m2")]
+        + [row("b:0", "m1", dataset="b")]
+        + [row("a:1", m) for m in POOL]
+    )
+    report = apply_coverage(rows, POOL)
+    assert report.dropped_prompts == [
+        {"dataset": "a", "prompt_id": "a:10", "reason": "duplicate_row"},
+        {"dataset": "a", "prompt_id": "a:9", "reason": "prompt_mismatch"},
+        {"dataset": "b", "prompt_id": "b:0", "reason": "missing_model"},
+        {"dataset": "b", "prompt_id": "b:2", "reason": "missing_model"},
+    ]
 
 
 def test_coverage_drops_dataset_missing_a_model_entirely():
@@ -97,6 +129,7 @@ def test_coverage_drops_dataset_missing_a_model_entirely():
     ]
     report = apply_coverage(rows, pool)
     assert report.dropped_datasets == {"beta": ["missing model m-cheap"]}
+    assert report.dropped_prompts == []
     assert list(report.datasets) == ["alpha"]
     assert {r.dataset for r in report.kept} == {"alpha"}
 
@@ -137,6 +170,7 @@ def test_prepare_manifest_contents(tmp_path):
         "pool",
         "datasets",
         "dropped_datasets",
+        "dropped_prompts",
         "non_pool_rows",
         "conversion",
         "splits",
@@ -170,6 +204,7 @@ def test_prepare_manifest_contents(tmp_path):
     }
     assert m["datasets"]["alpha"]["prompts_in"] == m["datasets"]["alpha"]["prompts_kept"] == 150
     assert m["pool"] == list(SYNTH_POOL) and m["dropped_datasets"] == {}
+    assert m["dropped_prompts"] == []
     assert m["non_pool_rows"] == 0
     assert set(m["conversion"]) == {"records", "usage_clamped"}
     assert m["files"]["test"]["sha256"] == sha256_file(paths.splits_dir / "test.jsonl")
@@ -223,6 +258,9 @@ def test_prepare_records_dropped_prompts_and_datasets(tmp_path):
     assert m["dropped_datasets"] == {"delta": ["missing model m-cheap"]}
     assert "delta" not in m["datasets"]
     assert m["datasets"]["alpha"]["dropped"]["missing_model"] == 1
+    assert m["dropped_prompts"] == [
+        {"dataset": "alpha", "prompt_id": "alpha:3", "reason": "missing_model"}
+    ]
     assert m["datasets"]["alpha"]["prompts_kept"] == 19
     assert m["non_pool_rows"] == 1
     assert sum(m["splits"]["counts"].values()) == 19 + 20 + 20

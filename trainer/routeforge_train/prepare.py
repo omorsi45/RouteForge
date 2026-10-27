@@ -32,6 +32,7 @@ class CoverageReport:
     datasets: dict[str, dict]
     dropped_datasets: dict[str, list[str]]
     non_pool_rows: int
+    dropped_prompts: list[dict[str, str]]
 
 
 @dataclass(frozen=True)
@@ -60,6 +61,7 @@ def apply_coverage(rows: Iterable[OutcomeRow], pool: Sequence[str]) -> CoverageR
     datasets: dict[str, dict] = {}
     dropped_datasets: dict[str, list[str]] = {}
     kept_ids: set[str] = set()
+    dropped_prompts: list[dict[str, str]] = []
     for dataset, by_prompt in prompts.items():
         present = {r.model for group in by_prompt.values() for r in group}
         absent = [f"missing model {m}" for m in pool if m not in present]
@@ -75,6 +77,9 @@ def apply_coverage(rows: Iterable[OutcomeRow], pool: Sequence[str]) -> CoverageR
                 kept += 1
             else:
                 dropped[reason] += 1
+                dropped_prompts.append(
+                    {"dataset": dataset, "prompt_id": prompt_id, "reason": reason}
+                )
         datasets[dataset] = {
             "family": next(iter(by_prompt.values()))[0].family,
             "prompts_in": len(by_prompt),
@@ -86,6 +91,7 @@ def apply_coverage(rows: Iterable[OutcomeRow], pool: Sequence[str]) -> CoverageR
         datasets=datasets,
         dropped_datasets=dropped_datasets,
         non_pool_rows=non_pool,
+        dropped_prompts=sorted(dropped_prompts, key=lambda d: (d["dataset"], d["prompt_id"])),
     )
 
 
@@ -149,6 +155,7 @@ def prepare(
             for dataset, stats in report.datasets.items()
         },
         "dropped_datasets": report.dropped_datasets,
+        "dropped_prompts": report.dropped_prompts,
         "non_pool_rows": report.non_pool_rows,
         "conversion": {
             "records": conversion["records"],

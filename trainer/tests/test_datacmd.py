@@ -101,6 +101,7 @@ def test_run_data_end_to_end_on_synthetic_archive(tmp_path):
     assert set(manifest["conversion"]) == {"records", "usage_clamped"}
     assert len(manifest["conversion"]["records"]) == 12
     assert manifest["dropped_datasets"] == {} and manifest["non_pool_rows"] == 0
+    assert manifest["dropped_prompts"] == []
     for name in counts:
         assert (paths.splits_dir / f"{name}.jsonl").is_file()
     assert (paths.raw_lrb / member_names()[0]).is_file()
