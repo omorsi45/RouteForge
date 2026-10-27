@@ -1,8 +1,12 @@
 GO ?= go
 GOVULNCHECK_VERSION := v1.9.0
 EXAMPLE_CONFIGS := $(wildcard deploy/configs/*.yaml)
+PYTHON ?= python3
+VENV := trainer/.venv
+VPY := $(VENV)/bin/python
+TRAIN := PYTHONPATH=trainer $(VPY) -m routeforge_train --root .
 
-.PHONY: check fmt-check vet build tidy-check validate-configs test test-race vuln
+.PHONY: check fmt-check vet build tidy-check validate-configs test test-race vuln py-setup py-check py-test
 
 check: fmt-check vet build tidy-check validate-configs
 
@@ -29,3 +33,14 @@ test-race:
 
 vuln:
 	$(GO) run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
+
+py-setup:
+	$(PYTHON) -m venv $(VENV)
+	$(VPY) -m pip install --disable-pip-version-check --no-deps -r trainer/requirements.txt -r trainer/requirements-dev.txt
+	$(VPY) -m pip check
+
+py-check:
+	cd trainer && .venv/bin/ruff check . && .venv/bin/ruff format --check .
+
+py-test:
+	cd trainer && .venv/bin/python -m pytest

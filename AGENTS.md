@@ -4,6 +4,8 @@
 
 - `make check test test-race vuln` is the full gate and mirrors CI.
 - `make check` runs gofmt, vet, build, `go mod tidy -diff` and validates the example configs.
+- `make py-setup py-check py-test` is the Python gate (venv `trainer/.venv`, exact pins installed with `--no-deps`, then `pip check`).
+- `make data train evaluate` downloads LLMRouterBench and regenerates the derived artifacts; it never runs in CI.
 
 ## Git
 
@@ -35,3 +37,4 @@
 ## Local-only files
 
 - Never commit `docs/superpowers/` or `.superpowers/`.
+- Never commit `data/raw/`, `data/work/` or `trainer/artifacts/replay/` (raw third-party data).
