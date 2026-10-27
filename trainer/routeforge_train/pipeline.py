@@ -29,6 +29,7 @@ from routeforge_train.features import (
 from routeforge_train.gbm import GBMModel, fit_gbm
 from routeforge_train.knn import KNNModel, fit_knn
 from routeforge_train.lr import LRModel, choose_c, fit_lr
+from routeforge_train.metrics import StrategyOutcome, summarize
 from routeforge_train.policy import PREDICTOR_TYPES, ModelEntry, Policy
 from routeforge_train.prices import PriceTable
 from routeforge_train.routing import (
@@ -219,13 +220,18 @@ def routing_metrics(
     if n == 0:
         raise ValueError("cannot compute routing metrics for no rows")
     rows = np.arange(n)
-    n_success = int(success[rows, chosen].sum())
-    total = math.fsum(cost[rows, chosen].tolist())
+    summary = summarize(
+        StrategyOutcome(
+            name="routed",
+            success=success[rows, chosen],
+            cost=cost[rows, chosen],
+            regret=regret_mask(chosen, success, strongest),
+            shares={},
+        )
+    )
     return {
-        "accuracy": n_success / n,
-        "total_cost_usd": total,
-        "cost_per_success_usd": total / n_success if n_success else None,
-        "regret_rate": int(regret_mask(chosen, success, strongest).sum()) / n,
+        key: summary[key]
+        for key in ("accuracy", "total_cost_usd", "cost_per_success_usd", "regret_rate")
     }
 
 
