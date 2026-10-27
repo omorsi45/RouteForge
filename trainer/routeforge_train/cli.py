@@ -3,6 +3,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from routeforge_train import datacmd
 from routeforge_train.errors import TrainerError
 from routeforge_train.paths import Paths
 
@@ -13,7 +14,8 @@ def build_parser() -> argparse.ArgumentParser:
         description="Offline trainer, calibrator and evaluator for RouteForge routing policies.",
     )
     parser.add_argument("--root", default=".", help="repository root (default: .)")
-    parser.add_subparsers(dest="command", metavar="COMMAND")
+    subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
+    datacmd.register(subparsers)
     return parser
 
 
