@@ -76,7 +76,14 @@ def regret_counts(
 def ltt_lambda(
     n: int, counts: Sequence[int], alpha: float, delta: float = DELTA
 ) -> tuple[float, int]:
-    """Certified lambda and its regret count; (SENTINEL_LAMBDA, 0) when 1.00 is not rejected."""
+    """Certified lambda and its regret count; (SENTINEL_LAMBDA, 0) when 1.00 is not rejected.
+
+    `counts` holds one regret count per lambda of `LAMBDA_GRID`, in grid order.
+    """
+    if len(counts) != len(LAMBDA_GRID):
+        raise ValueError(
+            f"counts has {len(counts)} entries, the lambda grid has {len(LAMBDA_GRID)}"
+        )
     certified, k_at = None, 0
     for lam, k in zip(LAMBDA_GRID, counts, strict=True):
         if scipy.stats.binom.cdf(k, n, alpha) <= delta:

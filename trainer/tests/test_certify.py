@@ -46,6 +46,15 @@ def test_ltt_rejects_wrong_count_length():
         ltt_lambda(200, [0] * 100, 0.10)
 
 
+@pytest.mark.parametrize("counts", [[13], [13, 0], [13] + [0] * 101])
+def test_ltt_rejects_wrong_count_length_even_when_the_loop_would_stop_early(counts):
+    # With n = 200 and alpha = 0.10 a count of 13 at lambda 1.00 is not rejected, so the loop
+    # would break on the first entry and never reach the end of a short or long list.
+    assert len(counts) != len(LAMBDA_GRID)
+    with pytest.raises(ValueError, match=rf"{len(counts)} entries.*{len(LAMBDA_GRID)}"):
+        ltt_lambda(200, counts, 0.10)
+
+
 def test_clopper_pearson_upper_known():
     assert clopper_pearson_upper(0, 100) == pytest.approx(0.029513049607039932, abs=1e-12)
     assert clopper_pearson_upper(0, 148) == pytest.approx(0.02003795168910416, abs=1e-12)
