@@ -44,7 +44,7 @@ _MANIFEST_KEYS = (
 )
 
 
-def _read_manifest(path: Path) -> dict[str, Any]:
+def read_manifest(path: Path) -> dict[str, Any]:
     try:
         manifest = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
@@ -59,7 +59,7 @@ def _read_manifest(path: Path) -> dict[str, Any]:
     return manifest
 
 
-def _load_table(paths: Paths, manifest: dict[str, Any], name: str) -> OutcomeTable:
+def load_table(paths: Paths, manifest: dict[str, Any], name: str) -> OutcomeTable:
     try:
         return pivot(read_verified_split(paths, manifest, name), manifest["pool"])
     except ValueError as exc:
@@ -164,11 +164,11 @@ def run_train(
     now = datetime.now(UTC) if now is None else now
     git_sha = current_git_sha(paths.root) if git_sha is None else git_sha
     created_at = utc_iso(now)
-    manifest = _read_manifest(paths.manifest)
+    manifest = read_manifest(paths.manifest)
     prices = load_prices(paths.prices)
-    train = _load_table(paths, manifest, "train")
-    calibration = _load_table(paths, manifest, "calibration")
-    certification = _load_table(paths, manifest, "certification")
+    train = load_table(paths, manifest, "train")
+    calibration = load_table(paths, manifest, "calibration")
+    certification = load_table(paths, manifest, "certification")
 
     fitted = fit_pipeline(train, calibration, prices)
     selection = select_served(fitted, calibration, prices)

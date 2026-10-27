@@ -209,4 +209,4 @@ def test_only_evaluate_reads_test_split():
             )
             if named:
                 callers.add(path.stem)
-    assert callers <= {"evaluate"}
+    assert callers == {"evaluate"}

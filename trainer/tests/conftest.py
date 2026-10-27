@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import pytest
 
 from routeforge_train.certify import ProfileCert
+from routeforge_train.evaluate import run_evaluate
 from routeforge_train.pipeline import Fitted, certify, fit_pipeline, to_policy
 from routeforge_train.policy import Policy
 from routeforge_train.prices import PriceTable, load_prices
@@ -36,6 +37,18 @@ def trained_paths(tmp_path_factory):
     paths = build_synthetic_project(tmp_path_factory.mktemp("trained"))
     run_train(paths, git_sha="synthetic", now=FIXED_NOW)
     return paths
+
+
+@pytest.fixture(scope="session")
+def evaluated(trained_paths):
+    """The evaluation report of the trained synthetic project, with small resample counts."""
+    return run_evaluate(
+        trained_paths,
+        git_sha="synthetic",
+        now=FIXED_NOW,
+        n_resamples=2000,
+        n_random_seeds=200,
+    )
 
 
 @pytest.fixture(scope="session")
