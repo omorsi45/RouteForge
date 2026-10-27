@@ -3,7 +3,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from routeforge_train import datacmd, evaluate, train
+from routeforge_train import datacmd, evaluate, extraction, train
 from routeforge_train.errors import TrainerError
 from routeforge_train.paths import Paths
 
@@ -18,6 +18,7 @@ def build_parser() -> argparse.ArgumentParser:
     datacmd.register(subparsers)
     train.register(subparsers)
     evaluate.register(subparsers)
+    extraction.register(subparsers)
     return parser
 
 

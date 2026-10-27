@@ -5,8 +5,9 @@ PYTHON ?= python3
 VENV := trainer/.venv
 VPY := $(VENV)/bin/python
 TRAIN := PYTHONPATH=trainer $(VPY) -m routeforge_train --root .
+EXTRACTION_MODELS ?=
 
-.PHONY: check fmt-check vet build tidy-check validate-configs test test-race vuln py-setup py-check py-test data train evaluate
+.PHONY: check fmt-check vet build tidy-check validate-configs test test-race vuln py-setup py-check py-test data train evaluate label-extraction
 
 check: fmt-check vet build tidy-check validate-configs
 
@@ -53,3 +54,7 @@ train:
 
 evaluate:
 	$(TRAIN) evaluate
+
+label-extraction:
+	@test -n "$(EXTRACTION_MODELS)" || { echo "set EXTRACTION_MODELS, for example: make label-extraction EXTRACTION_MODELS=llama3.2:3b"; exit 2; }
+	$(TRAIN) label-extraction --models "$(EXTRACTION_MODELS)"
