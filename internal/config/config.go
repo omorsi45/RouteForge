@@ -29,6 +29,7 @@ type Config struct {
 	Reliability Reliability `yaml:"reliability"`
 	Policy      Policy      `yaml:"policy"`
 	Pricing     Pricing     `yaml:"pricing"`
+	Accounting  Accounting  `yaml:"accounting"`
 	Admin       Admin       `yaml:"admin"`
 	Tenants     []Tenant    `yaml:"tenants"`
 	Providers   []Provider  `yaml:"providers"`
@@ -86,6 +87,25 @@ type Pricing struct {
 	File string `yaml:"file"`
 }
 
+// Fail modes of the accounting backends, spec section 11.
+const (
+	// FailModeClosed refuses a request when a budget or limiter backend cannot
+	// be reached. It is the default.
+	FailModeClosed = "closed"
+	// FailModeOpen lets the request through unmetered instead.
+	FailModeOpen = "open"
+)
+
+// Accounting configures admission, budgets and usage records.
+type Accounting struct {
+	// FailMode is FailModeClosed or FailModeOpen.
+	FailMode string `yaml:"fail_mode"`
+	// UsageQueue is how many usage records may wait to be written before the
+	// gateway stops admitting work. The in-memory usage store has no queue and
+	// ignores it.
+	UsageQueue int `yaml:"usage_queue"`
+}
+
 // Server holds HTTP server settings.
 type Server struct {
 	Listen            string        `yaml:"listen"`
@@ -107,7 +127,7 @@ type Defaults struct {
 	MaxOutputTokens int           `yaml:"max_output_tokens"`
 }
 
-// Tenant is one API consumer and its limits.
+// Tenant is one API consumer and its limits. A limit of 0 means unlimited.
 type Tenant struct {
 	Name                  string        `yaml:"name"`
 	APIKeySHA256          []string      `yaml:"api_key_sha256"`
@@ -116,6 +136,14 @@ type Tenant struct {
 	MaxOutputTokens       int           `yaml:"max_output_tokens"`
 	AllowStrategyOverride bool          `yaml:"allow_strategy_override"`
 	AllowedModels         []string      `yaml:"allowed_models"`
+
+	// RPM and TPM are the requests and the tokens (prompt estimate plus output
+	// cap) the tenant may use per minute.
+	RPM int `yaml:"rpm"`
+	TPM int `yaml:"tpm"`
+	// DailyBudgetUSD is what the tenant may spend per UTC day. It must be a
+	// whole number of nano-USD.
+	DailyBudgetUSD float64 `yaml:"daily_budget_usd"`
 }
 
 // Allows reports whether the tenant may use model. An empty AllowedModels

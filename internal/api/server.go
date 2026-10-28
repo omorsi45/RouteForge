@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/omorsi45/routeforge/internal/accounting"
 	"github.com/omorsi45/routeforge/internal/auth"
 	"github.com/omorsi45/routeforge/internal/config"
 	"github.com/omorsi45/routeforge/internal/executor"
@@ -41,11 +42,12 @@ type Options struct {
 	Keys        *auth.Store
 	Router      router.Router
 	Executor    *executor.Executor
-	Decisions   store.DecisionStore   // nil: a ring of 10,000 decisions
-	Policies    *policy.Registry      // the registry the router reads; may be nil, and then the admin routes do not exist
-	InFlight    *reliability.InFlight // limits concurrent chat and explain requests; nil means no limit
-	Logger      *slog.Logger          // nil: slog.New(slog.DiscardHandler)
-	Now         func() time.Time      // nil: time.Now
+	Accountant  *accounting.Accountant // admits and meters chat requests; nil means no rate limits, budgets or usage records
+	Decisions   store.DecisionStore    // nil: a ring of 10,000 decisions
+	Policies    *policy.Registry       // the registry the router reads; may be nil, and then the policy admin routes do not exist
+	InFlight    *reliability.InFlight  // limits concurrent chat and explain requests; nil means no limit
+	Logger      *slog.Logger           // nil: slog.New(slog.DiscardHandler)
+	Now         func() time.Time       // nil: time.Now
 	ReadyChecks []ReadyCheck
 }
 
@@ -56,6 +58,7 @@ type Server struct {
 	adminKeys map[string]struct{} // digests of the admin keys
 	router    router.Router
 	exec      *executor.Executor
+	acct      *accounting.Accountant
 	decisions store.DecisionStore
 	policies  *policy.Registry
 	inflight  *reliability.InFlight
@@ -73,6 +76,7 @@ func New(o Options) *Server {
 		adminKeys: make(map[string]struct{}, len(o.Config.Admin.APIKeySHA256)),
 		router:    o.Router,
 		exec:      o.Executor,
+		acct:      o.Accountant,
 		decisions: o.Decisions,
 		policies:  o.Policies,
 		inflight:  o.InFlight,
@@ -106,6 +110,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /admin/policies", s.handleAdminUpload)
 	mux.HandleFunc("POST /admin/policies/rollback", s.handleAdminRollback)
 	mux.HandleFunc("POST /admin/policies/{version}/activate", s.handleAdminActivate)
+	mux.HandleFunc("GET /admin/accounting", s.handleAdminAccounting)
 	mux.HandleFunc("GET /v1/models", s.handleModels)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /readyz", s.handleReadyz)

@@ -9,7 +9,9 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/omorsi45/routeforge/internal/accounting"
 	"github.com/omorsi45/routeforge/internal/config"
+	"github.com/omorsi45/routeforge/internal/executor"
 	"github.com/omorsi45/routeforge/internal/policy"
 	"github.com/omorsi45/routeforge/internal/provider"
 	"github.com/omorsi45/routeforge/internal/router"
@@ -25,8 +27,18 @@ type chatState struct {
 	created             int64
 	decision            *router.Decision
 	includeUsage        bool
-	deadlineCtx         context.Context // carries the request deadline
-	clientCtx           context.Context // r.Context(); canceled when the client leaves
+	meter               *accounting.Meter // nil without accounting
+	deadlineCtx         context.Context   // carries the request deadline
+	clientCtx           context.Context   // r.Context(); canceled when the client leaves
+}
+
+// execMeter is the meter to give the executor. It is a nil interface, not a
+// nil *Meter in one, when there is no accounting.
+func (st *chatState) execMeter() executor.Meter {
+	if st.meter == nil {
+		return nil
+	}
+	return st.meter
 }
 
 // failure returns the error to send for a failed upstream call, or nil when
@@ -61,6 +73,11 @@ type routeforgeExt struct {
 	DecisionID string `json:"decision_id"`
 	Reason     string `json:"reason"`
 	Attempts   int    `json:"attempts"`
+	// CostUSD and CostSource are set on non-streaming responses of a gateway
+	// with accounting: the cost of every attempt, and whether it came from
+	// reported or estimated usage. A stream has no place for them.
+	CostUSD    *float64 `json:"cost_usd,omitempty"`
+	CostSource string   `json:"cost_source,omitempty"`
 }
 
 type chatResponse struct {
@@ -200,6 +217,20 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	defer call.cancel()
 
+	// Admission follows the body check and precedes routing, and nothing is
+	// reserved until a decision has been made: a request refused for its rate
+	// or by the router costs no budget.
+	if s.acct != nil {
+		if err := s.acct.Admit(call.ctx, call.rreq.Tenant, call.rreq.PromptBytes, call.rreq.MaxTokens); err != nil {
+			aerr := accountingError(err)
+			if aerr == nil {
+				aerr = errAccountingUnavailable()
+			}
+			writeError(w, aerr)
+			return
+		}
+	}
+
 	d, err := s.router.Decide(call.ctx, call.rreq)
 	if err != nil {
 		writeError(w, fromRouterError(err))
@@ -221,6 +252,9 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		deadlineCtx:  call.ctx,
 		clientCtx:    r.Context(),
 	}
+	if s.acct != nil {
+		st.meter = s.acct.NewMeter(call.rreq.Tenant, info.requestID, d.ID, call.rreq.PromptBytes, call.rreq.MaxTokens)
+	}
 	if call.req.Stream {
 		s.serveStream(w, r, st, call.preq)
 		return
@@ -230,7 +264,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 // serveJSON runs the non-streaming call and writes the completion.
 func (s *Server) serveJSON(w http.ResponseWriter, r *http.Request, st *chatState, preq provider.Request) {
-	res, err := s.exec.Complete(st.deadlineCtx, st.decision, preq, nil)
+	res, err := s.exec.Complete(st.deadlineCtx, st.decision, preq, st.execMeter())
 	// The executor has recorded the attempt, so the decision is final. Store
 	// it before replying so a client that has the response can read it back.
 	s.storeDecision(r, st.decision)
@@ -254,6 +288,11 @@ func (s *Server) serveJSON(w http.ResponseWriter, r *http.Request, st *chatState
 	}
 	resp.Choices[0].Message.Role = provider.RoleAssistant
 	resp.Choices[0].Message.Content = res.Response.Content
+	if st.meter != nil {
+		// Complete has settled every attempt by the time it returns.
+		cost := st.meter.CostUSD()
+		resp.RouteForge.CostUSD, resp.RouteForge.CostSource = &cost, st.meter.CostSource()
+	}
 	if u := res.Response.Usage; u != nil {
 		resp.Usage = &chatUsage{
 			PromptTokens:     u.PromptTokens,

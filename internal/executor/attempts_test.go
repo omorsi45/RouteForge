@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -1498,17 +1499,6 @@ func TestHealthObservedOnSuccessOnly(t *testing.T) {
 		}
 	})
 
-	t.Run("a successful call without usage counts no tokens", func(t *testing.T) {
-		r, h := newRig("a"), newHealth()
-		r.p["a"].complete = seq(ok("hi"))
-		if _, err := r.exec(setup(h)).Complete(context.Background(), route("a"), provider.Request{}, nil); err != nil {
-			t.Fatal(err)
-		}
-		if got, want := predict(h), expected(health.Observation{Total: tick, Tokens: 0}); got != want {
-			t.Fatalf("prediction = %v, want %v", got, want)
-		}
-	})
-
 	t.Run("a failed call", func(t *testing.T) {
 		r, h := newRig("a"), newHealth()
 		r.p["a"].complete = seq(fail(provErr(provider.KindUnavailable, "down")))
@@ -1613,6 +1603,86 @@ func TestHealthObservedOnSuccessOnly(t *testing.T) {
 		}
 		if got := h.PredictedP95MS("b", 100); got == fresh {
 			t.Error("serving model was not observed")
+		}
+	})
+}
+
+// A provider that sends no usage still decoded something, so the estimators
+// are told the spec 11 estimate of the output, not zero tokens: with 0 the whole
+// decode time would be charged to one token and inflate the per-token latency.
+func TestHealthObservedWithEstimatedTokensWhenUsageMissing(t *testing.T) {
+	// Longer than the TTFT prior, so a response's decode time is not zero and the
+	// token count shows in the prediction.
+	const tick = 2 * time.Second
+	priors := map[string]health.Prior{"a": {TTFTMS: 500, DecodeTokensPerS: 50, Jitter: 0.1}}
+	predict := func(h *health.Registry) float64 { return h.PredictedP95MS("a", 100) }
+	expected := func(o health.Observation) float64 {
+		h := health.NewRegistry(priors, health.DefaultAlpha)
+		h.Observe("a", o)
+		return predict(h)
+	}
+	setup := func(h *health.Registry) func(*executor.Options) {
+		return func(o *executor.Options) { o.Health = h; o.Now = steppingClock(tick); o.MaxAttempts = 1 }
+	}
+
+	t.Run("a response without usage", func(t *testing.T) {
+		h := health.NewRegistry(priors, health.DefaultAlpha)
+		r := newRig("a")
+		r.p["a"].complete = seq(ok(strings.Repeat("x", 41))) // 41 bytes: 11 tokens
+		if _, err := r.exec(setup(h)).Complete(context.Background(), route("a"), provider.Request{}, nil); err != nil {
+			t.Fatal(err)
+		}
+		want := expected(health.Observation{Total: tick, Tokens: 11})
+		if got := predict(h); got != want {
+			t.Fatalf("prediction = %v, want %v (11 estimated tokens)", got, want)
+		}
+		if zero := expected(health.Observation{Total: tick, Tokens: 0}); want == zero {
+			t.Fatalf("the estimate changes nothing: %v equals the zero-token prediction", want)
+		}
+	})
+
+	t.Run("a stream without usage", func(t *testing.T) {
+		h := health.NewRegistry(priors, health.DefaultAlpha)
+		r := newRig("a")
+		// 7 + 6 delivered bytes: 4 tokens.
+		r.p["a"].stream = streams(streamResult{s: &stubStream{steps: []step{delta("xxxxxxx"), delta("xxxxxx")}}})
+		s, err := r.exec(setup(h)).Stream(context.Background(), route("a"), provider.Request{}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := drain(s); !errors.Is(err, io.EOF) {
+			t.Fatal(err)
+		}
+		want := expected(health.Observation{TTFT: tick, Total: 2 * tick, Tokens: 4, Streamed: true})
+		if got := predict(h); got != want {
+			t.Fatalf("prediction = %v, want %v (4 estimated tokens)", got, want)
+		}
+		if zero := expected(health.Observation{TTFT: tick, Total: 2 * tick, Tokens: 0, Streamed: true}); want == zero {
+			t.Fatalf("the estimate changes nothing: %v equals the zero-token prediction", want)
+		}
+	})
+
+	t.Run("reported usage still wins over the estimate", func(t *testing.T) {
+		h := health.NewRegistry(priors, health.DefaultAlpha)
+		r := newRig("a")
+		r.p["a"].complete = seq(okUsage(strings.Repeat("x", 400), 3))
+		if _, err := r.exec(setup(h)).Complete(context.Background(), route("a"), provider.Request{}, nil); err != nil {
+			t.Fatal(err)
+		}
+		if got, want := predict(h), expected(health.Observation{Total: tick, Tokens: 3}); got != want {
+			t.Fatalf("prediction = %v, want %v (3 reported tokens)", got, want)
+		}
+	})
+
+	t.Run("an empty response has no tokens to estimate", func(t *testing.T) {
+		h := health.NewRegistry(priors, health.DefaultAlpha)
+		r := newRig("a")
+		r.p["a"].complete = seq(ok(""))
+		if _, err := r.exec(setup(h)).Complete(context.Background(), route("a"), provider.Request{}, nil); err != nil {
+			t.Fatal(err)
+		}
+		if got, want := predict(h), expected(health.Observation{Total: tick, Tokens: 0}); got != want {
+			t.Fatalf("prediction = %v, want %v", got, want)
 		}
 	})
 }

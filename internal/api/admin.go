@@ -1,11 +1,13 @@
 package api
 
 import (
+	"cmp"
 	"errors"
 	"io"
 	"net/http"
 	"time"
 
+	"github.com/omorsi45/routeforge/internal/accounting"
 	"github.com/omorsi45/routeforge/internal/auth"
 	"github.com/omorsi45/routeforge/internal/policy"
 )
@@ -18,12 +20,22 @@ const (
 	maxPolicyBytes = 8 << 20
 )
 
-// authorizeAdmin admits a request that carries an admin key. Without admin
-// keys or a policy registry the admin routes do not exist, so they answer
-// 404 whatever the request carries. A missing or wrong key is 401.
+// authorizeAdmin admits a request that carries an admin key to the policy
+// routes. Without admin keys or a policy registry these routes do not exist,
+// so they answer 404 whatever the request carries. A missing or wrong key is
+// 401.
 func (s *Server) authorizeAdmin(r *http.Request) *Error {
-	if len(s.adminKeys) == 0 || s.policies == nil {
-		return &Error{Status: http.StatusNotFound, Code: CodeNotFound, Message: "not found"}
+	if s.policies == nil {
+		return errAdminNotFound()
+	}
+	return s.checkAdminKey(r)
+}
+
+// checkAdminKey admits a request that carries an admin key. Without admin keys
+// the admin routes do not exist and answer 404.
+func (s *Server) checkAdminKey(r *http.Request) *Error {
+	if len(s.adminKeys) == 0 {
+		return errAdminNotFound()
 	}
 	if token, ok := auth.BearerToken(r.Header); ok {
 		if _, found := s.adminKeys[auth.HashKey(token)]; found {
@@ -31,6 +43,10 @@ func (s *Server) authorizeAdmin(r *http.Request) *Error {
 		}
 	}
 	return &Error{Status: http.StatusUnauthorized, Code: CodeInvalidAPIKey, Message: "invalid API key"}
+}
+
+func errAdminNotFound() *Error {
+	return &Error{Status: http.StatusNotFound, Code: CodeNotFound, Message: "not found"}
 }
 
 type adminPolicy struct {
@@ -176,4 +192,65 @@ func (s *Server) writeAdminFailure(w http.ResponseWriter, r *http.Request, msg s
 func (s *Server) logActivation(r *http.Request, a policy.Activation) {
 	s.logger.InfoContext(r.Context(), "policy activated",
 		"request_id", infoFrom(r.Context()).requestID, "version", a.Version, "previous", a.Previous, "actor", a.Actor)
+}
+
+// adminAccounting is the answer of GET /admin/accounting: what a tenant spent,
+// holds in reservations and went over its budget by on a UTC day, and what its
+// usage records add up to. The benchmark checks the accounting invariants
+// through it (Ruling R10).
+type adminAccounting struct {
+	Tenant         string  `json:"tenant"`
+	Day            string  `json:"day"`
+	SpentUSD       float64 `json:"spent_usd"`
+	ReservedUSD    float64 `json:"reserved_usd"`
+	OvershootUSD   float64 `json:"overshoot_usd"`
+	SpentNanos     int64   `json:"spent_nanos"`
+	ReservedNanos  int64   `json:"reserved_nanos"`
+	OvershootNanos int64   `json:"overshoot_nanos"`
+	UsageRecords   int     `json:"usage_records"`
+	UsageCostNanos int64   `json:"usage_cost_nanos"`
+}
+
+// handleAdminAccounting reports a tenant's accounting for one day. The tenant
+// is required and need not exist: an unknown one has spent nothing. The day is
+// a yyyymmdd UTC date and defaults to today.
+func (s *Server) handleAdminAccounting(w http.ResponseWriter, r *http.Request) {
+	if s.acct == nil {
+		writeError(w, errAdminNotFound())
+		return
+	}
+	if aerr := s.checkAdminKey(r); aerr != nil {
+		writeError(w, aerr)
+		return
+	}
+	q := r.URL.Query()
+	tenant := q.Get("tenant")
+	if tenant == "" {
+		writeError(w, invalid("the tenant query parameter is required"))
+		return
+	}
+	day := cmp.Or(q.Get("day"), accounting.DayKey(s.now()))
+	if _, err := time.Parse("20060102", day); err != nil {
+		writeError(w, invalid("day must be a UTC date written yyyymmdd"))
+		return
+	}
+
+	budget, usage, err := s.acct.State(r.Context(), tenant, day)
+	if err != nil {
+		s.logger.ErrorContext(r.Context(), "read accounting state failed", "request_id", infoFrom(r.Context()).requestID, "error", err)
+		writeError(w, errAccountingUnavailable())
+		return
+	}
+	s.writeJSON(w, r, http.StatusOK, adminAccounting{
+		Tenant:         tenant,
+		Day:            day,
+		SpentUSD:       accounting.NanosToUSD(budget.Spent),
+		ReservedUSD:    accounting.NanosToUSD(budget.Reserved),
+		OvershootUSD:   accounting.NanosToUSD(budget.Overshoot),
+		SpentNanos:     budget.Spent,
+		ReservedNanos:  budget.Reserved,
+		OvershootNanos: budget.Overshoot,
+		UsageRecords:   usage.Records,
+		UsageCostNanos: usage.CostNanos,
+	})
 }

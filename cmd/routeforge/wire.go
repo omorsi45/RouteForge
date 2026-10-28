@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/omorsi45/routeforge/internal/accounting"
 	"github.com/omorsi45/routeforge/internal/api"
@@ -162,6 +164,21 @@ func buildExecutor(cfg *config.Config, providers map[string]provider.Provider, b
 		Backoff:     reliability.Backoff{Base: r.BackoffBase, Cap: r.BackoffCap},
 		Health:      latency,
 		MaxAttempts: r.MaxAttempts,
+	})
+}
+
+// buildAccountant returns the accountant of cfg over in-memory budgets, rate
+// limits and usage records, priced by prices. It admits and meters requests
+// as accounting.fail_mode says.
+func buildAccountant(cfg *config.Config, prices map[string]accounting.Price, logger *slog.Logger) *accounting.Accountant {
+	return accounting.NewAccountant(accounting.AccountantOptions{
+		Tenants:  cfg.Tenants,
+		Prices:   prices,
+		Budgets:  accounting.NewMemoryBudgets(),
+		Limiter:  accounting.NewMemoryLimiter(time.Now),
+		Usage:    accounting.NewMemoryUsage(usageRecordsKept),
+		FailMode: cfg.Accounting.FailMode,
+		Logger:   logger,
 	})
 }
 

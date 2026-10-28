@@ -29,8 +29,11 @@ type Signals struct {
 	PredictedP95MS func(model string, outputTokens float64) float64
 	// BudgetRemainingNanos returns what the tenant may still reserve, in
 	// nano-USD. limited is false when the tenant has no budget. An error is
-	// not turned into an ineligibility reason; when accounting defines its
-	// error this is where it will surface.
+	// not an ineligibility reason: it fails the decision, as an error that
+	// wraps accounting.ErrAccountingUnavailable, so that a budget backend that
+	// is down fails closed at routing time and not only at reservation. A
+	// signal that wants the request to go on without a budget answers limited
+	// false instead.
 	BudgetRemainingNanos func(ctx context.Context, tenant string) (remaining int64, limited bool, err error)
 }
 
@@ -132,7 +135,7 @@ type evaluation struct {
 	remaining    int64   // nano-USD the tenant may still reserve
 }
 
-func (e *Engine) newEvaluation(ctx context.Context, req *Request) *evaluation {
+func (e *Engine) newEvaluation(ctx context.Context, req *Request) (*evaluation, error) {
 	text := req.Text
 	if text == "" {
 		text = policy.FeatureText(req.Messages)
@@ -148,11 +151,15 @@ func (e *Engine) newEvaluation(ctx context.Context, req *Request) *evaluation {
 	}
 	if e.signals.BudgetRemainingNanos != nil {
 		remaining, limited, err := e.signals.BudgetRemainingNanos(ctx, req.Tenant.Name)
-		if err == nil {
-			ev.limited, ev.remaining = limited, remaining
+		if err != nil {
+			if errors.Is(err, accounting.ErrAccountingUnavailable) {
+				return nil, err
+			}
+			return nil, fmt.Errorf("%w: budget of tenant %q: %v", accounting.ErrAccountingUnavailable, req.Tenant.Name, err)
 		}
+		ev.limited, ev.remaining = limited, remaining
 	}
-	return ev
+	return ev, nil
 }
 
 // ineligibility lists every reason o cannot serve the request, in the fixed
@@ -257,7 +264,10 @@ func (e *Engine) routePinned(ctx context.Context, req *Request, d *Decision) err
 	}
 	d.Strategy = StrategyPinned
 
-	ev := e.newEvaluation(ctx, req)
+	ev, err := e.newEvaluation(ctx, req)
+	if err != nil {
+		return err
+	}
 	o := &option{model: m}
 	if pol := e.activePolicy(); pol != nil {
 		if i, ok := pol.ModelIndex(m.PolicyName); ok {
@@ -301,7 +311,10 @@ func (e *Engine) routeAuto(ctx context.Context, req *Request, d *Decision) error
 		lambda = profile.Lambda
 	}
 
-	ev := e.newEvaluation(ctx, req)
+	ev, err := e.newEvaluation(ctx, req)
+	if err != nil {
+		return err
+	}
 	features := policy.Featurize(ev.text)
 	opts := e.options(ev, pol, pol.Score(&features))
 
@@ -421,7 +434,10 @@ func (e *Engine) routeWithoutPolicy(ctx context.Context, req *Request, d *Decisi
 	}
 	d.Strategy = strategy
 
-	ev := e.newEvaluation(ctx, req)
+	ev, err := e.newEvaluation(ctx, req)
+	if err != nil {
+		return err
+	}
 	var opts []*option
 	for i := range e.models {
 		m := &e.models[i]

@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/omorsi45/routeforge/internal/accounting"
 	"github.com/omorsi45/routeforge/internal/executor"
 	"github.com/omorsi45/routeforge/internal/provider"
 	"github.com/omorsi45/routeforge/internal/router"
@@ -144,8 +145,35 @@ func errInFlightFull() *Error {
 	}
 }
 
+// accountingError maps a failure of admission, budget reservation or the
+// budget signal to an API error, or returns nil for any other error.
+func accountingError(err error) *Error {
+	var (
+		limited *accounting.RateLimitedError
+		budget  *accounting.BudgetExceededError
+	)
+	switch {
+	case errors.As(err, &limited):
+		return &Error{Status: http.StatusTooManyRequests, Code: CodeRateLimited, Message: fmt.Sprintf("the %s limit of this API key was exceeded", limited.Kind), RetryAfter: limited.RetryAfter}
+	case errors.As(err, &budget):
+		return &Error{Status: http.StatusTooManyRequests, Code: CodeBudgetExceeded, Message: "the daily budget of this API key is used up", RetryAfter: budget.RetryAfter}
+	case errors.Is(err, accounting.ErrAccountingUnavailable):
+		return errAccountingUnavailable()
+	}
+	return nil
+}
+
+// errAccountingUnavailable is the response when accounting cannot admit or
+// meter a request. The backend's own error text stays in the log.
+func errAccountingUnavailable() *Error {
+	return &Error{Status: http.StatusServiceUnavailable, Code: CodeAccountingUnavailable, Message: "accounting is unavailable", RetryAfter: time.Second}
+}
+
 // fromRouterError maps a router failure to an API error.
 func fromRouterError(err error) *Error {
+	if aerr := accountingError(err); aerr != nil {
+		return aerr
+	}
 	switch {
 	case errors.Is(err, router.ErrUnknownModel), errors.Is(err, router.ErrStrategyUnavailable):
 		return &Error{Status: http.StatusBadRequest, Code: CodeInvalidRequest, Message: err.Error()}
@@ -163,8 +191,12 @@ func fromRouterError(err error) *Error {
 // Upstream text reaches the client only for 4xx kinds the client can act on;
 // 5xx responses carry the kind alone. A request no model accepted is the
 // gateway's own overload: 503 overloaded, like a full queue found by the
-// router.
+// router. A budget or accounting failure of the first attempt, which the
+// executor returns as it is, keeps its own status.
 func fromUpstreamError(err error) *Error {
+	if aerr := accountingError(err); aerr != nil {
+		return aerr
+	}
 	if errors.Is(err, executor.ErrNoTargetAccepted) {
 		return &Error{Status: http.StatusServiceUnavailable, Code: CodeOverloaded, Message: executor.ErrNoTargetAccepted.Error(), RetryAfter: time.Second}
 	}

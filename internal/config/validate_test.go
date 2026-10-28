@@ -2,10 +2,12 @@ package config_test
 
 import (
 	"math"
+	"math/rand/v2"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/omorsi45/routeforge/internal/accounting"
 	"github.com/omorsi45/routeforge/internal/config"
 )
 
@@ -99,6 +101,15 @@ func TestValidateRejects(t *testing.T) {
 		{"negative queue size", func(c *config.Config) { c.Models[0].QueueSize = -1 }, "models[0].queue_size: must not be negative"},
 		{"zero queue timeout", func(c *config.Config) { c.Models[0].QueueTimeout = 0 }, "models[0].queue_timeout: must be positive"},
 		{"negative queue timeout", func(c *config.Config) { c.Models[0].QueueTimeout = -time.Second }, "models[0].queue_timeout: must be positive"},
+		{"negative rpm", func(c *config.Config) { c.Tenants[0].RPM = -1 }, "tenants[0].rpm: must not be negative"},
+		{"negative tpm", func(c *config.Config) { c.Tenants[0].TPM = -1 }, "tenants[0].tpm: must not be negative"},
+		{"negative budget", func(c *config.Config) { c.Tenants[0].DailyBudgetUSD = -1 }, "tenants[0].daily_budget_usd: must be finite and not negative"},
+		{"nan budget", func(c *config.Config) { c.Tenants[0].DailyBudgetUSD = math.NaN() }, "tenants[0].daily_budget_usd: must be finite and not negative"},
+		{"inf budget", func(c *config.Config) { c.Tenants[0].DailyBudgetUSD = math.Inf(1) }, "tenants[0].daily_budget_usd: must be finite and not negative"},
+		{"budget finer than a nano-USD", func(c *config.Config) { c.Tenants[0].DailyBudgetUSD = 0.0000000001 }, "tenants[0].daily_budget_usd: must be a whole number of nano-USD (at most 9 decimals)"},
+		{"budget too large to be exact", func(c *config.Config) { c.Tenants[0].DailyBudgetUSD = 2e6 }, "tenants[0].daily_budget_usd: must be at most 1125899.906842624 USD"},
+		{"bad fail mode", func(c *config.Config) { c.Accounting.FailMode = "maybe" }, `accounting.fail_mode: must be one of closed, open`},
+		{"negative usage queue", func(c *config.Config) { c.Accounting.UsageQueue = -1 }, "accounting.usage_queue: must be at least 1"},
 		{"zero deadline", func(c *config.Config) { c.Server.DefaultDeadline = 0 }, "server.default_deadline: must be positive"},
 		{"empty listen", func(c *config.Config) { c.Server.Listen = "" }, "server.listen: must not be empty"},
 		{"zero body bytes", func(c *config.Config) { c.Server.MaxBodyBytes = 0 }, "server.max_body_bytes: must be positive"},
@@ -386,6 +397,70 @@ func TestValidateJoinsAllErrors(t *testing.T) {
 	for _, want := range []string{"tenants[0].profile", "server.default_deadline"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q missing %q", err.Error(), want)
+		}
+	}
+}
+
+func TestAccountingDefaults(t *testing.T) {
+	c := valid(t)
+	if c.Accounting.FailMode != config.FailModeClosed {
+		t.Errorf("default fail_mode = %q, want %q", c.Accounting.FailMode, config.FailModeClosed)
+	}
+	if c.Accounting.UsageQueue != 10000 {
+		t.Errorf("default usage_queue = %d, want 10000", c.Accounting.UsageQueue)
+	}
+	if ten := c.Tenants[0]; ten.RPM != 0 || ten.TPM != 0 || ten.DailyBudgetUSD != 0 {
+		t.Errorf("tenant limits default to %d rpm, %d tpm, %v USD; want 0 (unlimited) for all", ten.RPM, ten.TPM, ten.DailyBudgetUSD)
+	}
+}
+
+func TestParseAccountingSettings(t *testing.T) {
+	doc := "accounting: {fail_mode: open, usage_queue: 50}\n" + strings.Replace(minimalDoc,
+		"    api_key_sha256:\n",
+		"    rpm: 120\n    tpm: 60000\n    daily_budget_usd: 12.345678901\n    api_key_sha256:\n", 1)
+	c, err := config.Parse([]byte(doc))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if c.Accounting.FailMode != config.FailModeOpen || c.Accounting.UsageQueue != 50 {
+		t.Errorf("accounting = %+v", c.Accounting)
+	}
+	ten := c.Tenants[0]
+	if ten.RPM != 120 || ten.TPM != 60000 || ten.DailyBudgetUSD != 12.345678901 {
+		t.Errorf("tenant limits = %d, %d, %v", ten.RPM, ten.TPM, ten.DailyBudgetUSD)
+	}
+}
+
+func TestValidateAcceptsExactBudgets(t *testing.T) {
+	for _, usd := range []float64{0, 5, 0.1, 0.000000001, 12.345678901, 1234.5, 1_000_000} {
+		c := valid(t)
+		c.Tenants[0].DailyBudgetUSD = usd
+		if err := c.Validate(); err != nil {
+			t.Errorf("budget %v: %v", usd, err)
+		}
+	}
+}
+
+// config cannot import accounting, whose conversion rule it repeats, so this
+// keeps the two in step: a budget is valid exactly when USDToNanos takes it.
+func TestBudgetValidationAgreesWithUSDToNanos(t *testing.T) {
+	values := []float64{
+		0, 1, 5, 0.1, 0.5, 0.25, 0.000000001, 0.0000000001, 0.0000000015, 0.00000000149,
+		12.345678901, 12.3456789012, 1234.5, 99999.999999999, 1_000_000, 1_125_899.906842624,
+		1_125_899.906842625, 2e6, 1e12, -1, -0.000000001, math.NaN(), math.Inf(1), math.Inf(-1),
+	}
+	rng := rand.New(rand.NewPCG(3, 5))
+	for range 2000 {
+		values = append(values, accounting.NanosToUSD(rng.Int64N(1<<50)))
+		values = append(values, rng.Float64()*1000)
+	}
+	c := valid(t)
+	for _, usd := range values {
+		_, convErr := accounting.USDToNanos(usd)
+		c.Tenants[0].DailyBudgetUSD = usd
+		valErr := c.Validate()
+		if (convErr == nil) != (valErr == nil) {
+			t.Fatalf("budget %v: USDToNanos error = %v, Validate error = %v", usd, convErr, valErr)
 		}
 	}
 }

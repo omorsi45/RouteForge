@@ -95,6 +95,13 @@ func (c *Config) ApplyDefaults() {
 
 	c.Reliability.applyDefaults()
 
+	if c.Accounting.FailMode == "" {
+		c.Accounting.FailMode = FailModeClosed
+	}
+	if c.Accounting.UsageQueue == 0 {
+		c.Accounting.UsageQueue = 10000
+	}
+
 	for i := range c.Tenants {
 		t := &c.Tenants[i]
 		if t.Profile == "" {

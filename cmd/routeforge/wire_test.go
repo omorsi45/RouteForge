@@ -740,6 +740,91 @@ models:
 	return cfg
 }
 
+// The gateway admits and meters requests: the wiring gives the API an
+// accountant and the router its budget signal.
+func TestGatewayEnforcesTenantLimits(t *testing.T) {
+	readBody := func(t *testing.T, resp *http.Response) (code string, raw []byte) {
+		t.Helper()
+		defer resp.Body.Close()
+		raw, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var env struct {
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		_ = json.Unmarshal(raw, &env) // a success body has no error
+		return env.Error.Code, raw
+	}
+	start := func(t *testing.T, edit func(*config.Tenant)) (base string, hits func() int) {
+		t.Helper()
+		upstream, hits := scriptedUpstream(t, http.StatusOK)
+		cfg := upstreamConfig(t, upstream, "")
+		edit(&cfg.Tenants[0])
+		base, _ = startGatewayConfig(t, cfg, slog.New(slog.DiscardHandler))
+		return base, hits
+	}
+
+	t.Run("requests per minute", func(t *testing.T) {
+		base, hits := start(t, func(ten *config.Tenant) { ten.RPM = 1 })
+		resp := post(t, base, e2eKey, chatBody("m-up", ""))
+		if code, raw := readBody(t, resp); resp.StatusCode != http.StatusOK {
+			t.Fatalf("first request: status = %d (%s); body %s", resp.StatusCode, code, raw)
+		}
+		resp = post(t, base, e2eKey, chatBody("m-up", ""))
+		if code, raw := readBody(t, resp); resp.StatusCode != http.StatusTooManyRequests || code != "rate_limited" {
+			t.Fatalf("second request: status = %d (%s), want 429 rate_limited; body %s", resp.StatusCode, code, raw)
+		}
+		if resp.Header.Get("Retry-After") == "" {
+			t.Error("no Retry-After on the 429")
+		}
+		if got := hits(); got != 1 {
+			t.Errorf("upstream saw %d requests, want 1", got)
+		}
+	})
+
+	t.Run("the router sees the budget", func(t *testing.T) {
+		// The budget cannot hold the reservation of 4096 output tokens. The
+		// router refuses the model first, which only happens when it is given
+		// the accountant's budget signal; without it the reservation would be
+		// refused later as budget_exceeded.
+		base, hits := start(t, func(ten *config.Tenant) { ten.DailyBudgetUSD = 0.001 })
+		resp := post(t, base, e2eKey, chatBody("m-up", ""))
+		code, raw := readBody(t, resp)
+		if resp.StatusCode != http.StatusServiceUnavailable || code != "no_eligible_model" || !strings.Contains(string(raw), "budget") {
+			t.Fatalf("status = %d (%s), want 503 no_eligible_model naming the budget; body %s", resp.StatusCode, code, raw)
+		}
+		if got := hits(); got != 0 {
+			t.Errorf("upstream saw %d requests, want 0", got)
+		}
+	})
+
+	t.Run("a request that fits is metered", func(t *testing.T) {
+		base, _ := start(t, func(ten *config.Tenant) { ten.DailyBudgetUSD = 1 })
+		resp := post(t, base, e2eKey, chatBody("m-up", ""))
+		code, raw := readBody(t, resp)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d (%s); body %s", resp.StatusCode, code, raw)
+		}
+		var body struct {
+			RouteForge struct {
+				CostUSD    *float64 `json:"cost_usd"`
+				CostSource string   `json:"cost_source"`
+			} `json:"routeforge"`
+		}
+		if err := json.Unmarshal(raw, &body); err != nil {
+			t.Fatal(err)
+		}
+		// The upstream reports 1 prompt and 1 completion token, at 1000 and
+		// 2000 nano-USD per token.
+		if got := body.RouteForge.CostUSD; got == nil || *got != 3000.0/1e9 || body.RouteForge.CostSource != "reported" {
+			t.Errorf("cost = %v %q, want 3e-06 reported; body %s", got, body.RouteForge.CostSource, raw)
+		}
+	})
+}
+
 func TestBuildBreakersUsesTheConfiguredThresholds(t *testing.T) {
 	cfg := parseWireConfig(t)
 	cfg.Reliability.Breaker.ConsecutiveFailures = 2

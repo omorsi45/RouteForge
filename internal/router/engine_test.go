@@ -3,6 +3,7 @@ package router_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"reflect"
 	"slices"
@@ -1172,15 +1173,63 @@ func TestEngineBudget(t *testing.T) {
 		wantPick(t, d, qwen, router.ReasonCheapest)
 	})
 
-	t.Run("signal error marks no reason", func(t *testing.T) {
+	// A budget backend that cannot answer must fail closed at routing time, not
+	// only at reservation: the error surfaces as accounting.ErrAccountingUnavailable
+	// and no decision comes with it.
+	t.Run("signal error fails closed", func(t *testing.T) {
+		down := func(w *world) {
+			w.signals.BudgetRemainingNanos = func(context.Context, string) (int64, bool, error) {
+				return 0, true, errors.New("budget backend down")
+			}
+		}
+		pinned := autoReq("", "balanced")
+		pinned.Model = gpt5
+		for _, tc := range []struct {
+			name   string
+			engine func(*testing.T, *world) *router.Engine
+			req    *router.Request
+		}{
+			{"quality", func(t *testing.T, w *world) *router.Engine { return w.engine(t) }, autoReq("quality", "balanced")},
+			{"cheapest", func(t *testing.T, w *world) *router.Engine { return w.engine(t) }, autoReq("cheapest", "balanced")},
+			{"pinned", func(t *testing.T, w *world) *router.Engine { return w.engine(t) }, pinned},
+			{"without a policy", func(t *testing.T, w *world) *router.Engine { return w.engineNoPolicy(t) }, autoReq("", "balanced")},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				w := newWorld()
+				down(w)
+				d, err := decideWith(tc.engine(t, w), tc.req)
+				if !errors.Is(err, accounting.ErrAccountingUnavailable) {
+					t.Fatalf("err = %v, want accounting.ErrAccountingUnavailable", err)
+				}
+				if d != nil {
+					t.Errorf("decision = %+v, want nil", d)
+				}
+			})
+		}
+	})
+
+	t.Run("an unavailable signal error is passed on as it is", func(t *testing.T) {
 		w := newWorld()
 		w.signals.BudgetRemainingNanos = func(context.Context, string) (int64, bool, error) {
-			return 0, true, errors.New("budget backend down")
+			return 0, false, fmt.Errorf("budget: %w", accounting.ErrAccountingUnavailable)
 		}
+		_, err := decideWith(w.engine(t), autoReq("quality", "balanced"))
+		if !errors.Is(err, accounting.ErrAccountingUnavailable) {
+			t.Fatalf("err = %v, want accounting.ErrAccountingUnavailable", err)
+		}
+		if got := strings.Count(err.Error(), "accounting unavailable"); got != 1 {
+			t.Errorf("error %q names the sentinel %d times, want once", err, got)
+		}
+	})
+
+	t.Run("a signal that finds no budget leaves every model eligible", func(t *testing.T) {
+		// What the accountant answers in open mode when its backend is down.
+		w := newWorld()
+		w.signals.BudgetRemainingNanos = func(context.Context, string) (int64, bool, error) { return 0, false, nil }
 		d := mustDecide(t, w.engine(t), autoReq("quality", "balanced"))
 		for _, c := range d.Candidates {
 			if !c.Eligible {
-				t.Errorf("%s ineligible after a signal error: %v", c.Model, c.IneligibleReasons)
+				t.Errorf("%s ineligible without a budget: %v", c.Model, c.IneligibleReasons)
 			}
 		}
 	})

@@ -102,7 +102,7 @@ func (c *chunkWriter) encode(ev provider.StreamEvent) ([]byte, error) {
 // as a terminal error event and the stream ends without [DONE]; there is no
 // retry once a byte has gone out.
 func (s *Server) serveStream(w http.ResponseWriter, r *http.Request, st *chatState, preq provider.Request) {
-	stream, err := s.exec.Stream(st.deadlineCtx, st.decision, preq, nil)
+	stream, err := s.exec.Stream(st.deadlineCtx, st.decision, preq, st.execMeter())
 	if err != nil {
 		s.storeDecision(r, st.decision) // the executor recorded the failed attempt
 		if aerr := st.failure(err); aerr != nil {

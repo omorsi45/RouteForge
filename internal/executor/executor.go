@@ -24,6 +24,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/omorsi45/routeforge/internal/accounting"
 	"github.com/omorsi45/routeforge/internal/health"
 	"github.com/omorsi45/routeforge/internal/provider"
 	"github.com/omorsi45/routeforge/internal/reliability"
@@ -45,25 +46,13 @@ type Meter interface {
 	Begin(ctx context.Context, model string) (Charge, error)
 }
 
-// Charge is one attempt's open charge.
-type Charge interface {
-	// End settles the attempt. The executor calls it exactly once for every
-	// charge that Begin returned, whatever happened, a panic included.
-	End(s Settlement)
-}
-
-// Settlement says what an attempt did.
-type Settlement struct {
-	// Outcome is a router.Outcome* value; a stream that failed after
-	// delivering output is router.OutcomePartial.
-	Outcome string
-	// Usage is what the provider reported, or nil. A stream reports the last
-	// usage it sent.
-	Usage *provider.Usage
-	// DeliveredBytes is the size of the output handed to the caller: the
-	// content of a response, or the sum of the deltas a stream returned.
-	DeliveredBytes int
-}
+// Charge is one attempt's open charge and Settlement says what the attempt did.
+// Accounting defines both, because it cannot import this package (the executor
+// imports the router, which imports accounting).
+type (
+	Charge     = accounting.Charge
+	Settlement = accounting.Settlement
+)
 
 // Target binds a configured model name to its provider and upstream model id.
 type Target struct {
@@ -365,12 +354,15 @@ func classify(err error) string {
 	return router.OutcomeError
 }
 
-// completionTokens is the completion token count u reports, or 0 without usage.
-func completionTokens(u *provider.Usage) int {
-	if u == nil {
-		return 0
+// outputTokens is the number of completion tokens an attempt produced: what the
+// provider reported, else the spec 11 estimate from the bytes delivered, so a
+// provider that sends no usage does not make the health estimators charge a
+// whole response's decode time to one token.
+func outputTokens(u *provider.Usage, deliveredBytes int) int {
+	if u != nil {
+		return u.CompletionTokens
 	}
-	return u.CompletionTokens
+	return accounting.EstimateTokens(deliveredBytes)
 }
 
 // attempt is one admitted upstream call and everything it holds: the model's
@@ -451,7 +443,7 @@ func (a *attempt) end(r ending) {
 			a.e.health.Observe(a.target.Model, health.Observation{
 				TTFT:     r.ttft,
 				Total:    dur,
-				Tokens:   completionTokens(r.usage),
+				Tokens:   outputTokens(r.usage, r.delivered),
 				Streamed: r.streamed,
 			})
 		}

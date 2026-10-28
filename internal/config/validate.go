@@ -6,6 +6,7 @@ import (
 	"math"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -35,6 +36,7 @@ func (c *Config) Validate() error {
 
 	c.validateServer(add)
 	c.validateReliability(add)
+	c.validateAccounting(add)
 
 	if len(c.Providers) == 0 {
 		add("providers", "at least one provider is required")
@@ -116,6 +118,39 @@ func (c *Config) validateReliability(add addFunc) {
 			add(f.path, "must be in (0, 1]")
 		}
 	}
+}
+
+func (c *Config) validateAccounting(add addFunc) {
+	if !oneOf(c.Accounting.FailMode, []string{FailModeClosed, FailModeOpen}) {
+		add("accounting.fail_mode", "must be one of %s, %s", FailModeClosed, FailModeOpen)
+	}
+	if c.Accounting.UsageQueue < 1 {
+		add("accounting.usage_queue", "must be at least 1")
+	}
+}
+
+// Budgets are exact amounts of nano-USD, so a budget must survive a trip
+// through float64 unchanged. accounting.USDToNanos applies the same rule when
+// the gateway converts the budget; config cannot import accounting, which
+// imports config, and a test keeps the two in step.
+const (
+	nanosPerUSD    = 1e9
+	maxBudgetNanos = 1 << 50 // about 1.1 million USD; above it float64 product rounding is not exact
+)
+
+// budgetProblem says why usd is not a valid daily budget, or returns "".
+func budgetProblem(usd float64) string {
+	if math.IsNaN(usd) || math.IsInf(usd, 0) || usd < 0 {
+		return "must be finite and not negative"
+	}
+	scaled := math.Round(usd * nanosPerUSD)
+	if scaled > maxBudgetNanos {
+		return "must be at most " + strconv.FormatFloat(float64(maxBudgetNanos)/nanosPerUSD, 'f', -1, 64) + " USD"
+	}
+	if float64(int64(scaled))/nanosPerUSD != usd {
+		return "must be a whole number of nano-USD (at most 9 decimals)"
+	}
+	return ""
 }
 
 func (c *Config) validateProviders(add addFunc) {
@@ -330,6 +365,15 @@ func (c *Config) validateTenants(add addFunc) map[string]string {
 		}
 		if t.MaxOutputTokens <= 0 {
 			add(base+".max_output_tokens", "must be positive")
+		}
+		if t.RPM < 0 {
+			add(base+".rpm", "must not be negative")
+		}
+		if t.TPM < 0 {
+			add(base+".tpm", "must not be negative")
+		}
+		if problem := budgetProblem(t.DailyBudgetUSD); problem != "" {
+			add(base+".daily_budget_usd", "%s", problem)
 		}
 		for k, m := range t.AllowedModels {
 			if _, ok := c.Model(m); !ok {

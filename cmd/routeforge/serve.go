@@ -23,10 +23,14 @@ import (
 // GET /v1/routing/decisions/{id}.
 const decisionRingSize = 10000
 
+// usageRecordsKept is how many of the latest usage records the in-memory usage
+// store holds. Totals cover every record.
+const usageRecordsKept = 100000
+
 // buildGateway constructs the HTTP surface over cfg: providers, prices, the
 // policy registry, the latency estimators, the model queues, the circuit
-// breakers, the routing engine and the executor that retries and fails over.
-// Without a policy the engine routes like the basic router.
+// breakers, the accountant, the routing engine and the executor that retries
+// and fails over. Without a policy the engine routes like the basic router.
 func buildGateway(cfg *config.Config, getenv func(string) string, logger *slog.Logger) (*api.Server, error) {
 	// No client Timeout: streams outlive any fixed value, so deadlines come
 	// from request contexts.
@@ -46,6 +50,7 @@ func buildGateway(cfg *config.Config, getenv func(string) string, logger *slog.L
 	latency := buildHealth(cfg)
 	queues := buildQueues(cfg)
 	breakers := buildBreakers(cfg)
+	acct := buildAccountant(cfg, prices, logger)
 
 	opts := api.Options{
 		Config: cfg,
@@ -55,16 +60,18 @@ func buildGateway(cfg *config.Config, getenv func(string) string, logger *slog.L
 			Prices:   prices,
 			Policies: reg,
 			Signals: router.Signals{
-				BreakerOpen:    breakers.IsOpen,
-				QueueFull:      queues.Full,
-				PredictedP95MS: latency.PredictedP95MS,
+				BreakerOpen:          breakers.IsOpen,
+				QueueFull:            queues.Full,
+				PredictedP95MS:       latency.PredictedP95MS,
+				BudgetRemainingNanos: acct.RemainingNanos,
 			},
 		}),
-		Executor:  buildExecutor(cfg, providers, breakers, queues, latency),
-		Decisions: store.NewRing(decisionRingSize),
-		Policies:  reg,
-		InFlight:  reliability.NewInFlight(cfg.Server.MaxInFlight),
-		Logger:    logger,
+		Executor:   buildExecutor(cfg, providers, breakers, queues, latency),
+		Accountant: acct,
+		Decisions:  store.NewRing(decisionRingSize),
+		Policies:   reg,
+		InFlight:   reliability.NewInFlight(cfg.Server.MaxInFlight),
+		Logger:     logger,
 	}
 	if cfg.Policy.Path != "" {
 		opts.ReadyChecks = []api.ReadyCheck{policyReadyCheck(reg)}
