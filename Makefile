@@ -7,7 +7,7 @@ VPY := $(VENV)/bin/python
 TRAIN := OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONPATH=trainer $(VPY) -m routeforge_train --root .
 EXTRACTION_MODELS ?=
 
-.PHONY: check fmt-check vet build tidy-check validate-configs test test-race test-integration vuln py-setup py-check py-test data train evaluate label-extraction build-bench bench-replay bench-load bench-faults report
+.PHONY: check fmt-check vet build tidy-check validate-configs test test-race test-integration docker compose-smoke vuln py-setup py-check py-test data train evaluate label-extraction build-bench bench-replay bench-load bench-faults report
 
 check: fmt-check vet build tidy-check validate-configs
 
@@ -34,6 +34,12 @@ test-race:
 
 test-integration:
 	$(GO) test -tags integration -count=1 ./...
+
+docker:
+	docker build -f deploy/Dockerfile --build-arg VERSION=$$(git describe --always --dirty) -t routeforge:local .
+
+compose-smoke:
+	bash scripts/compose-smoke.sh
 
 vuln:
 	$(GO) run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...

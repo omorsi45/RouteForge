@@ -1,0 +1,10 @@
+.git
+bin/
+data/
+docs/
+examples/
+.github/
+bench/results/
+trainer/.venv
+trainer/artifacts/replay/
+**/__pycache__
