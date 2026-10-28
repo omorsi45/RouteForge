@@ -4,6 +4,7 @@ package bench
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -234,5 +236,290 @@ func TestPSSampleReadsARunningProcess(t *testing.T) {
 	}
 	if _, err := psSample(1 << 30); err == nil {
 		t.Error("want an error for a process that does not exist")
+	}
+}
+
+// statLine builds the line /proc/<pid>/stat holds: 52 fields, of which the
+// tests set the command name (field 2), utime (14), stime (15) and rss (24).
+func statLine(pid int, comm string, utime, stime, rss int64) string {
+	fields := []string{strconv.Itoa(pid), "(" + comm + ")"}
+	for n := 3; n <= 52; n++ {
+		value := "0"
+		switch n {
+		case 3:
+			value = "S"
+		case 14:
+			value = strconv.FormatInt(utime, 10)
+		case 15:
+			value = strconv.FormatInt(stime, 10)
+		case 24:
+			value = strconv.FormatInt(rss, 10)
+		}
+		fields = append(fields, value)
+	}
+	return strings.Join(fields, " ") + "\n"
+}
+
+func TestParseProcStat(t *testing.T) {
+	for _, comm := range []string{
+		"routeforge bench", // spaces in the name
+		"routeforge",
+		"a) b (c", // unbalanced parentheses
+		"(x) y (z)",
+		") 1 2 3 (",
+		"",
+	} {
+		t.Run(comm, func(t *testing.T) {
+			got, err := parseProcStat([]byte(statLine(77, comm, 120, 30, 456)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.cpuTicks != 150 || got.rssPages != 456 {
+				t.Errorf("parsed %+v, want 150 CPU ticks (utime + stime) and 456 pages", got)
+			}
+		})
+	}
+}
+
+func TestParseProcStatRejectsBadLines(t *testing.T) {
+	good := statLine(77, "x", 1, 2, 3)
+	fields := strings.Fields(good)
+	withField := func(n int, value string) string { // field n counts from 1; the name has no spaces here
+		f := append([]string(nil), fields...)
+		f[n-1] = value
+		return strings.Join(f, " ")
+	}
+	for _, c := range []struct{ name, line string }{
+		{"empty", ""},
+		{"no command name", "77 S 1 2 3"},
+		{"too few fields", strings.Join(fields[:20], " ")},
+		{"utime not a number", withField(14, "many")},
+		{"stime not a number", withField(15, "-")},
+		{"rss not a number", withField(24, "1.5")},
+		{"negative utime", withField(14, "-4")},
+		{"negative rss", withField(24, "-4")},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got, err := parseProcStat([]byte(c.line)); err == nil {
+				t.Errorf("parsed %q as %+v, want an error", c.line, got)
+			}
+		})
+	}
+}
+
+// fakeClock is a clock that moves only when a test says so.
+type fakeClock struct{ t time.Time }
+
+func (c *fakeClock) now() time.Time          { return c.t }
+func (c *fakeClock) advance(d time.Duration) { c.t = c.t.Add(d) }
+
+func writeStat(t *testing.T, procDir string, pid int, content string) {
+	t.Helper()
+	dir := filepath.Join(procDir, strconv.Itoa(pid))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "stat"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// noPS is a ps that fails the test when it is asked.
+func noPS(t *testing.T) func(int) (ResourceSample, error) {
+	return func(pid int) (ResourceSample, error) {
+		t.Errorf("ps was asked about process %d, want /proc/<pid>/stat only", pid)
+		return ResourceSample{}, errors.New("ps not expected")
+	}
+}
+
+func TestProcSamplerComputesCPUPerInterval(t *testing.T) {
+	const pid = 4242
+	dir := t.TempDir()
+	clock := &fakeClock{t: time.Unix(1_000, 0)}
+	s := &procSampler{procDir: dir, pageSize: 4096, now: clock.now, ps: noPS(t)}
+
+	// The first reading only sets the baseline: an interval needs two.
+	writeStat(t, dir, pid, statLine(pid, "routeforge bench", 100, 40, 300))
+	first, err := s.Sample(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.RSSBytes != 300*4096 || !first.NoCPU || first.CPUMethod != CPUMethodProcStat {
+		t.Errorf("first sample = %+v, want 300 pages of 4096 bytes, no CPU yet, method %s", first, CPUMethodProcStat)
+	}
+
+	// 50 ticks of CPU time in one second: half of one CPU at 100 ticks/s.
+	clock.advance(time.Second)
+	writeStat(t, dir, pid, statLine(pid, "routeforge bench", 130, 60, 310))
+	second, err := s.Sample(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.NoCPU || second.CPUMethod != CPUMethodProcStat || second.RSSBytes != 310*4096 {
+		t.Errorf("second sample = %+v, want a CPU reading, method %s and 310 pages", second, CPUMethodProcStat)
+	}
+	requireClose(t, "cpu over 1 s", second.CPUPercent, 50)
+
+	// The next interval is measured from the previous reading, not from the first.
+	clock.advance(2 * time.Second)
+	writeStat(t, dir, pid, statLine(pid, "routeforge bench", 150, 90, 310)) // +50 ticks in 2 s
+	third, err := s.Sample(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireClose(t, "cpu over 2 s", third.CPUPercent, 25)
+
+	// More than one CPU is more than 100 percent, and an idle interval is 0.
+	clock.advance(time.Second)
+	writeStat(t, dir, pid, statLine(pid, "routeforge bench", 250, 90, 310)) // +100 ticks in 1 s
+	fourth, err := s.Sample(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireClose(t, "cpu of a full CPU", fourth.CPUPercent, 100)
+	clock.advance(time.Second)
+	idle, err := s.Sample(pid) // the file is unchanged
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireClose(t, "cpu of an idle interval", idle.CPUPercent, 0)
+	if idle.NoCPU {
+		t.Error("an idle interval is a reading of 0, not a missing one")
+	}
+}
+
+func TestProcSamplerFallsBackToPS(t *testing.T) {
+	const pid = 4243
+	dir := t.TempDir() // no <pid>/stat in it, as on a host without /proc
+	var asked []int
+	s := &procSampler{
+		procDir: dir, pageSize: 4096, now: (&fakeClock{t: time.Unix(1_000, 0)}).now,
+		ps: func(pid int) (ResourceSample, error) {
+			asked = append(asked, pid)
+			return ResourceSample{RSSBytes: 5 << 20, CPUPercent: 7}, nil
+		},
+	}
+
+	for i := 0; i < 2; i++ {
+		got, err := s.Sample(pid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.CPUMethod != CPUMethodPSLifetime || got.NoCPU || got.CPUPercent != 7 || got.RSSBytes != 5<<20 {
+			t.Errorf("sample %d = %+v, want the ps reading labeled %s", i, got, CPUMethodPSLifetime)
+		}
+	}
+	if len(asked) != 2 || asked[0] != pid || asked[1] != pid {
+		t.Errorf("ps was asked about %v, want process %d twice", asked, pid)
+	}
+}
+
+func TestProcSamplerStartsOverForANewProcess(t *testing.T) {
+	dir := t.TempDir()
+	clock := &fakeClock{t: time.Unix(1_000, 0)}
+	s := &procSampler{procDir: dir, pageSize: 4096, now: clock.now, ps: noPS(t)}
+
+	writeStat(t, dir, 10, statLine(10, "gw", 500, 500, 1))
+	writeStat(t, dir, 11, statLine(11, "gw", 5, 5, 1))
+	if _, err := s.Sample(10); err != nil {
+		t.Fatal(err)
+	}
+	clock.advance(time.Second)
+	// Process 11 has used far less CPU time than process 10, which would read
+	// as a counter running backwards if it were measured against it.
+	got, err := s.Sample(11)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.NoCPU {
+		t.Errorf("first sample of a new process = %+v, want only a baseline", got)
+	}
+}
+
+func TestProcSamplerReportsWhatItCannotRead(t *testing.T) {
+	const pid = 4244
+	for _, c := range []struct {
+		name  string
+		setup func(t *testing.T, dir string)
+		want  string
+	}{
+		{"stat is a directory", func(t *testing.T, dir string) {
+			if err := os.MkdirAll(filepath.Join(dir, strconv.Itoa(pid), "stat"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}, "4244"},
+		{"stat is garbage", func(t *testing.T, dir string) { writeStat(t, dir, pid, "garbage\n") }, "4244"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			c.setup(t, dir)
+			s := &procSampler{procDir: dir, pageSize: 4096, now: time.Now, ps: noPS(t)}
+			_, err := s.Sample(pid)
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("err = %v, want one that names process %s", err, c.want)
+			}
+		})
+	}
+
+	t.Run("process vanishes after the first reading", func(t *testing.T) {
+		dir := t.TempDir()
+		s := &procSampler{procDir: dir, pageSize: 4096, now: time.Now, ps: noPS(t)}
+		writeStat(t, dir, pid, statLine(pid, "gw", 1, 1, 1))
+		if _, err := s.Sample(pid); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.RemoveAll(filepath.Join(dir, strconv.Itoa(pid))); err != nil {
+			t.Fatal(err)
+		}
+		// A gone process is an error, not a switch to ps: one run is measured one way.
+		if _, err := s.Sample(pid); err == nil {
+			t.Error("want an error when /proc/<pid>/stat goes away mid-run")
+		}
+	})
+
+	t.Run("CPU time runs backwards", func(t *testing.T) {
+		dir := t.TempDir()
+		clock := &fakeClock{t: time.Unix(1_000, 0)}
+		s := &procSampler{procDir: dir, pageSize: 4096, now: clock.now, ps: noPS(t)}
+		writeStat(t, dir, pid, statLine(pid, "gw", 100, 100, 1))
+		if _, err := s.Sample(pid); err != nil {
+			t.Fatal(err)
+		}
+		clock.advance(time.Second)
+		writeStat(t, dir, pid, statLine(pid, "gw", 10, 10, 1))
+		if _, err := s.Sample(pid); err == nil {
+			t.Error("want an error for a CPU time that went down")
+		}
+	})
+}
+
+func TestDefaultSamplerReadsThisProcess(t *testing.T) {
+	// On Linux the sampler reads /proc; elsewhere it falls back to ps. Either
+	// way it must read the resident size and, from the second reading, the CPU.
+	want := CPUMethodPSLifetime
+	if _, err := os.Stat(fmt.Sprintf("/proc/%d/stat", os.Getpid())); err == nil {
+		want = CPUMethodProcStat
+	}
+	s := newProcSampler()
+	first, err := s.Sample(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Burn a little CPU time so that the second interval has something in it.
+	deadline := time.Now().Add(60 * time.Millisecond)
+	for x := 0; time.Now().Before(deadline); x++ {
+		_ = x * x
+	}
+	second, err := s.Sample(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, smp := range []ResourceSample{first, second} {
+		if smp.CPUMethod != want || smp.RSSBytes <= 0 {
+			t.Errorf("sample %d = %+v, want method %s and a positive resident size", i, smp, want)
+		}
+	}
+	if want == CPUMethodProcStat && (!first.NoCPU || second.NoCPU || second.CPUPercent < 0) {
+		t.Errorf("first = %+v, second = %+v, want a baseline and then an interval reading", first, second)
 	}
 }

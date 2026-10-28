@@ -366,7 +366,7 @@ func TestRunLoadSamplesTheGatewayProcess(t *testing.T) {
 		defer mu.Unlock()
 		counts++
 		pids[pid] = true
-		smp := ResourceSample{RSSBytes: int64(counts) * 4096, CPUPercent: float64(counts)}
+		smp := ResourceSample{RSSBytes: int64(counts) * 4096, CPUPercent: float64(counts), CPUMethod: "test_method"}
 		seen = append(seen, smp)
 		return smp, nil
 	}
@@ -396,8 +396,86 @@ func TestRunLoadSamplesTheGatewayProcess(t *testing.T) {
 	if math.Abs(sc.CPUPercent["mean"]-cpuSum/float64(len(seen))) > 1e-9 {
 		t.Errorf("cpu = %v, want mean %v", sc.CPUPercent, cpuSum/float64(len(seen)))
 	}
+	if sc.CPUMethod != "test_method" {
+		t.Errorf("cpu method = %q, want the one the samples carry", sc.CPUMethod)
+	}
 	if sc.SamplingError != "" {
 		t.Errorf("sampling error %q with every sample read", sc.SamplingError)
+	}
+}
+
+func TestRunLoadMeansCPUOverIntervalsOnly(t *testing.T) {
+	s := newLoadStub(t)
+	s.delay = 5 * time.Millisecond
+	var calls atomic.Int32
+	opts := loadOptions(s, &fakeGatewayRecord{}, closedScenario("closed_loop_c2", 2, 30))
+	opts.Sample = func(int) (ResourceSample, error) {
+		smp := ResourceSample{RSSBytes: 1 << 20, CPUPercent: 40, CPUMethod: "proc_stat_interval"}
+		if calls.Add(1) == 1 {
+			// The first reading of a process is only a baseline: it carries no
+			// CPU figure, and a 0 in its place must not pull the mean down.
+			smp.NoCPU, smp.CPUPercent = true, 0
+		}
+		return smp, nil
+	}
+	res, err := RunLoad(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc := res.Scenarios["closed_loop_c2"]
+	if sc.Samples < 2 {
+		t.Fatalf("samples = %d, want the baseline and at least one more", sc.Samples)
+	}
+	if sc.CPUPercent["mean"] != 40 {
+		t.Errorf("cpu mean = %v over %d samples, want 40 (the baseline is not an interval)", sc.CPUPercent, sc.Samples)
+	}
+	if sc.CPUMethod != "proc_stat_interval" {
+		t.Errorf("cpu method = %q", sc.CPUMethod)
+	}
+	// The resident size of the baseline counts: memory needs no interval.
+	if sc.RSSBytes["mean"] != 1<<20 {
+		t.Errorf("rss = %v, want every sample counted", sc.RSSBytes)
+	}
+}
+
+func TestRunLoadWithOnlyABaselineHasNoCPU(t *testing.T) {
+	s := newLoadStub(t)
+	opts := loadOptions(s, &fakeGatewayRecord{}, closedScenario("closed_loop_c1", 1, 3))
+	opts.Sample = func(int) (ResourceSample, error) {
+		return ResourceSample{RSSBytes: 1 << 20, NoCPU: true, CPUMethod: "proc_stat_interval"}, nil
+	}
+	res, err := RunLoad(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc := res.Scenarios["closed_loop_c1"]
+	if sc.CPUPercent != nil || sc.CPUMethod != "" {
+		t.Errorf("cpu = %v, method = %q, want neither when no interval was measured", sc.CPUPercent, sc.CPUMethod)
+	}
+	if sc.RSSBytes == nil {
+		t.Error("the resident size was read and is missing")
+	}
+}
+
+func TestRunLoadSamplesPerIntervalByDefault(t *testing.T) {
+	s := newLoadStub(t)
+	s.delay = 5 * time.Millisecond
+	opts := loadOptions(s, &fakeGatewayRecord{}, closedScenario("closed_loop_c2", 2, 40))
+	opts.Sample = nil // the default sampler reads the gateway process, which is this test
+	res, err := RunLoad(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc := res.Scenarios["closed_loop_c2"]
+	want := CPUMethodPSLifetime
+	if _, err := os.Stat(fmt.Sprintf("/proc/%d/stat", os.Getpid())); err == nil {
+		want = CPUMethodProcStat
+	}
+	if sc.Samples < 2 || sc.SamplingError != "" || sc.RSSBytes["max"] <= 0 {
+		t.Fatalf("samples = %d, error %q, rss = %v, want the process read", sc.Samples, sc.SamplingError, sc.RSSBytes)
+	}
+	if sc.CPUMethod != want || sc.CPUPercent["mean"] < 0 {
+		t.Errorf("cpu method = %q, cpu = %v, want method %s and a mean of at least 0", sc.CPUMethod, sc.CPUPercent, want)
 	}
 }
 

@@ -113,7 +113,8 @@ type LoadOptions struct {
 	// Seed fixes the prompts and the arrival times.
 	Seed uint64
 	// SampleInterval is how often the gateway process is sampled (default 1 s)
-	// and Sample how (default ps).
+	// and Sample how. The default reads /proc/<pid>/stat, or ps where the
+	// process has no such file, with a fresh reading history for each scenario.
 	SampleInterval time.Duration
 	Sample         SampleFunc
 	// RequestTimeout bounds one request (default 60 s).
@@ -148,11 +149,16 @@ type ScenarioResult struct {
 
 	// Samples counts the resource samples of the gateway process taken. When
 	// none could be, RSSBytes and CPUPercent are absent and SamplingError says
-	// why. CPUPercent is what ps reports: CPU time over the process's life.
+	// why. CPUPercent is the mean of the CPU readings, and CPUMethod says what
+	// each of them covers: the interval since the previous sample
+	// (CPUMethodProcStat) or the life of the process (CPUMethodPSLifetime). The
+	// first sample of a process has no interval and is left out of the CPU
+	// mean; its resident size counts.
 	Samples       int                `json:"samples"`
 	SamplingError string             `json:"sampling_error,omitempty"`
 	RSSBytes      map[string]float64 `json:"rss_bytes,omitempty"`
 	CPUPercent    map[string]float64 `json:"cpu_percent,omitempty"`
+	CPUMethod     string             `json:"cpu_method,omitempty"`
 }
 
 // OverheadTarget is the verdict on the hypothesis that the gateway adds under
@@ -203,9 +209,6 @@ func RunLoad(ctx context.Context, o LoadOptions) (LoadResults, error) {
 	}
 	if o.SampleInterval <= 0 {
 		o.SampleInterval = time.Second
-	}
-	if o.Sample == nil {
-		o.Sample = psSample
 	}
 	if o.RequestTimeout <= 0 {
 		o.RequestTimeout = 60 * time.Second
@@ -309,7 +312,13 @@ func measure(ctx context.Context, o LoadOptions, sc Scenario, index int, gw Gate
 	snd := &sender{client: NewClient(gw.BaseURL(), o.Key), prompts: SyntheticPrompts(n, seed), timeout: o.RequestTimeout}
 	defer snd.client.Close() // the gateway is stopped next, and waits for idle connections to go
 
-	smp := startSampler(gw.PID(), o.SampleInterval, o.Sample)
+	sample := o.Sample
+	if sample == nil {
+		// One sampler per scenario: each scenario has its own gateway process,
+		// and the sampler keeps the previous reading of the process it follows.
+		sample = newProcSampler().Sample
+	}
+	smp := startSampler(gw.PID(), o.SampleInterval, sample)
 	start := time.Now()
 	var (
 		records []loadRecord
@@ -477,15 +486,21 @@ func buildScenarioResult(sc Scenario, records []loadRecord, elapsed time.Duratio
 	}
 	if len(samples) > 0 {
 		var rssMax, rssSum, cpuSum float64
+		cpuN := 0
 		for _, s := range samples {
 			rss := float64(s.RSSBytes)
 			rssMax = math.Max(rssMax, rss)
 			rssSum += rss
-			cpuSum += s.CPUPercent
+			if !s.NoCPU {
+				cpuSum += s.CPUPercent
+				cpuN++
+			}
 		}
-		n := float64(len(samples))
-		res.RSSBytes = map[string]float64{"max": rssMax, "mean": rssSum / n}
-		res.CPUPercent = map[string]float64{"mean": cpuSum / n}
+		res.RSSBytes = map[string]float64{"max": rssMax, "mean": rssSum / float64(len(samples))}
+		if cpuN > 0 {
+			res.CPUPercent = map[string]float64{"mean": cpuSum / float64(cpuN)}
+			res.CPUMethod = samples[0].CPUMethod
+		}
 	}
 	return res
 }

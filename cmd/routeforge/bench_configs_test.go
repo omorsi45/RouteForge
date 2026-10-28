@@ -174,7 +174,7 @@ func TestLoadBenchmarkOnTheShippedConfigs(t *testing.T) {
 					t.Errorf("%s: decision_us = %v, want the routing time of every request", name, sc.DecisionUS)
 				}
 				if sc.Samples == 0 || sc.RSSBytes["max"] <= 0 {
-					t.Errorf("%s: samples = %d, rss = %v (error %q), want ps to read this process", name, sc.Samples, sc.RSSBytes, sc.SamplingError)
+					t.Errorf("%s: samples = %d, rss = %v (error %q), want this process to be sampled", name, sc.Samples, sc.RSSBytes, sc.SamplingError)
 				}
 			}
 			if closed := res.Scenarios["closed"]; closed.StreamRequests != closed.Requests/2 {
