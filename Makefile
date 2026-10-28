@@ -7,7 +7,7 @@ VPY := $(VENV)/bin/python
 TRAIN := OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONPATH=trainer $(VPY) -m routeforge_train --root .
 EXTRACTION_MODELS ?=
 
-.PHONY: check fmt-check vet build tidy-check validate-configs test test-race test-integration docker compose-smoke vuln py-setup py-check py-test data train evaluate label-extraction build-bench bench-replay bench-load bench-faults report
+.PHONY: check fmt-check vet build tidy-check validate-configs test test-race test-integration docker compose-smoke vuln py-setup py-check py-test data train evaluate label-extraction build-bench bench-replay bench-load bench-faults report demo
 
 check: fmt-check vet build tidy-check validate-configs
 
@@ -88,3 +88,6 @@ report:
 	@test -n "$(RUN_ID)" || { echo "set RUN_ID, for example: make report RUN_ID=2026-10-28-report"; exit 2; }
 	$(GO) build -o bin/routeforge-bench ./cmd/routeforge-bench
 	bin/routeforge-bench report --root . --run-id "$(RUN_ID)" --out docs/benchmarks.md --readme README.md
+
+demo:
+	bash scripts/demo.sh

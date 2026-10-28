@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -865,5 +866,134 @@ func TestBenchCLIHelpListsReport(t *testing.T) {
 	_, out, _ := runCLI(t, "help")
 	if !strings.Contains(out, "report") {
 		t.Errorf("usage %q does not list report", out)
+	}
+}
+
+func TestBenchCLIHelpListsDemo(t *testing.T) {
+	_, out, _ := runCLI(t, "help")
+	if !strings.Contains(out, "demo") {
+		t.Errorf("usage %q does not list demo", out)
+	}
+}
+
+func TestDemoCLIRejectsBadFlags(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"empty key", []string{"demo", "--key", ""}, "--key"},
+		{"empty out", []string{"demo", "--out", ""}, "--out"},
+		{"unknown flag", []string{"demo", "--bogus"}, "bogus"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			code, _, errText := runCLI(t, c.args...)
+			if code != 2 {
+				t.Fatalf("exit %d, want 2", code)
+			}
+			if !strings.Contains(errText, c.want) {
+				t.Errorf("stderr %q does not mention %q", errText, c.want)
+			}
+		})
+	}
+}
+
+const demoCLIEvaluation = "../../internal/bench/testdata/report/evaluation.json"
+
+// demoCLIRoot builds a repository root with one demo prompt and, when withEval
+// is set, the synthetic evaluation of the report tests.
+func demoCLIRoot(t *testing.T, withEval bool) string {
+	t.Helper()
+	root := t.TempDir()
+	write := func(rel string, content []byte) {
+		t.Helper()
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, content, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("examples/prompts.json", []byte(`[{"name":"only","prompt":"the only demo prompt"}]`))
+	if withEval {
+		eval, err := os.ReadFile(demoCLIEvaluation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		write("trainer/artifacts/reports/evaluation.json", eval)
+	}
+	return root
+}
+
+func TestDemoCLIMissingInputs(t *testing.T) {
+	t.Run("no evaluation", func(t *testing.T) {
+		root := demoCLIRoot(t, false)
+		code, out, errText := runCLI(t, "demo", "--root", root)
+		if code != 1 || out != "" || !strings.Contains(errText, "trainer/artifacts/reports/evaluation.json") {
+			t.Errorf("exit %d, stdout %q, stderr %q, want exit 1 naming the evaluation file", code, out, errText)
+		}
+	})
+	t.Run("no prompts", func(t *testing.T) {
+		root := demoCLIRoot(t, true)
+		if err := os.Remove(filepath.Join(root, "examples", "prompts.json")); err != nil {
+			t.Fatal(err)
+		}
+		code, out, errText := runCLI(t, "demo", "--root", root)
+		if code != 1 || out != "" || !strings.Contains(errText, "prompts.json") {
+			t.Errorf("exit %d, stdout %q, stderr %q, want exit 1 naming the prompts file", code, out, errText)
+		}
+	})
+}
+
+func TestDemoCLIWritesOutput(t *testing.T) {
+	var mu sync.Mutex
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen = append(seen, r.URL.Path+" "+r.Header.Get("X-RouteForge-Profile"))
+		mu.Unlock()
+		if r.Header.Get("Authorization") != "Bearer "+testKey {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		switch r.URL.Path {
+		case "/v1/routing/explain":
+			fmt.Fprintf(w, `{"policy_version":"pol-test-1","profile":%q,"chosen":"model-b","reason":"cheapest_passing","lambda":0.7,`+
+				`"candidates":[{"model":"model-b","p":0.83,"lcb":0.7431,"block_n":100,"block_k":83,"expected_cost_usd":0.00025}]}`,
+				r.Header.Get("X-RouteForge-Profile"))
+		case "/v1/chat/completions":
+			w.Header().Set("X-RouteForge-Model", "model-b")
+			w.Header().Set("X-RouteForge-Decision-Id", "dec_cli")
+			fmt.Fprint(w, `{"routeforge":{"decision_id":"dec_cli","cost_usd":0.00031}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	root := demoCLIRoot(t, true)
+	code, out, errText := runCLI(t, "demo", "--base-url", srv.URL, "--key", testKey, "--root", root, "--out", "examples/demo-output.md")
+	if code != 0 || errText != "" || !strings.HasPrefix(out, "demo OK: ") || !strings.Contains(out, "examples/demo-output.md") {
+		t.Fatalf("exit %d, stdout %q, stderr %q, want exit 0 and a demo OK line naming the file", code, out, errText)
+	}
+	doc, err := os.ReadFile(filepath.Join(root, "examples", "demo-output.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"# Routing demo\n\n" + bench.DemoNotice,
+		"| only | balanced | model-b | cheapest_passing | 0.700 | 0.830 | 0.743 | 83 of 100 | $0.000250 |",
+		"- `only`: on the calibration set, 83 of 100 requests scored like this succeeded on model-b; 95% lower bound 0.74",
+		"H1: falsified (static_oracle_family)",
+	} {
+		if !strings.Contains(string(doc), want) {
+			t.Errorf("examples/demo-output.md does not contain %q", want)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != 4 {
+		t.Errorf("the gateway saw %d requests %q, want 3 explain requests and 1 chat request", len(seen), seen)
 	}
 }

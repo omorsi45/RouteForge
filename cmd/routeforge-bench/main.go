@@ -25,6 +25,7 @@ Commands:
   load    Measure throughput, latency and gateway overhead under open and closed loop load
   faults  Inject provider faults and check the accounting invariants
   report  Render docs/benchmarks.md and the README results block from the result files
+  demo    Show which models the router chooses for example prompts, and why, next to the offline baseline comparison
   help    Show this help
 `
 
@@ -34,6 +35,13 @@ const (
 	defaultKey      = "test-key-bench"
 	defaultOverKey  = "test-key-bench-over"
 	defaultAdminKey = "test-admin-key"
+
+	// The address and the public key of deploy/configs/policy-fake.yaml, which
+	// the demo runs against. They are meant for loopback runs only.
+	defaultDemoBaseURL = "http://127.0.0.1:18081"
+	defaultDemoKey     = "rf_local_demo_only"
+	// demoPromptsFile is where the demo reads its prompts, under the repository root.
+	demoPromptsFile = "examples/prompts.json"
 
 	// loadSeed and faultsSeed fix the prompts and the arrival times of the runs.
 	loadSeed   = 20261026
@@ -82,6 +90,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return cmdFaults(ctx, args[1:], stdout, stderr)
 	case "report":
 		return cmdReport(args[1:], stdout, stderr)
+	case "demo":
+		return cmdDemo(ctx, args[1:], stdout, stderr)
 	case "help":
 		fmt.Fprint(stdout, usageText)
 		return 0
@@ -268,6 +278,60 @@ func cmdReport(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	fmt.Fprintf(stdout, "report OK: wrote %s and %s for run %s\n", *out, *readme, *runID)
+	return 0
+}
+
+// cmdDemo runs the routing demo against a running gateway built from the demo
+// config and writes the Markdown to --out. The prompts and the evaluation are
+// read before the first request, so a missing input fails before anything is
+// sent. It exits 1 on any error.
+func cmdDemo(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("demo", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	baseURL := fs.String("base-url", defaultDemoBaseURL, "URL of the running gateway")
+	key := fs.String("key", defaultDemoKey, "API key of the demo tenant")
+	root := fs.String("root", ".", "repository root")
+	out := fs.String("out", "examples/demo-output.md", "file to write the demo document to (relative paths resolve against --root)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	for _, f := range []struct{ flag, value string }{{"--key", *key}, {"--out", *out}} {
+		if f.value == "" {
+			fmt.Fprintf(stderr, "demo: %s must not be empty\n", f.flag)
+			return 2
+		}
+	}
+
+	prompts, err := bench.LoadDemoPrompts(underRoot(*root, demoPromptsFile))
+	if err != nil {
+		fmt.Fprintf(stderr, "demo: %v\n", err)
+		return 1
+	}
+	ev, err := bench.LoadDemoEvaluation(filepath.Join(*root, "trainer", "artifacts", "reports"))
+	if err != nil {
+		fmt.Fprintf(stderr, "demo: %v\n", err)
+		return 1
+	}
+	results, err := bench.RunDemo(ctx, bench.DemoOptions{Client: bench.NewClient(*baseURL, *key), Prompts: prompts})
+	if err != nil {
+		fmt.Fprintf(stderr, "demo: %v\n", err)
+		return 1
+	}
+	doc, err := bench.RenderDemo(results, ev)
+	if err != nil {
+		fmt.Fprintf(stderr, "demo: %v\n", err)
+		return 1
+	}
+	outPath := underRoot(*root, *out)
+	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
+		fmt.Fprintf(stderr, "demo: %v\n", err)
+		return 1
+	}
+	if err := os.WriteFile(outPath, []byte(doc), 0o644); err != nil {
+		fmt.Fprintf(stderr, "demo: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "demo OK: wrote %s for %d prompts\n", *out, len(prompts))
 	return 0
 }
 
