@@ -869,7 +869,7 @@ func (p *downProvider) Stream(context.Context, provider.Request) (provider.Strea
 func buildDownExecutor(cfg *config.Config) (*executor.Executor, *downProvider) {
 	down := &downProvider{}
 	providers := map[string]provider.Provider{"oa": down, "anthropic": down, "fk": down}
-	return buildExecutor(cfg, providers, buildBreakers(cfg), buildQueues(cfg), buildHealth(cfg)), down
+	return buildExecutor(cfg, providers, buildBreakers(cfg), buildQueues(cfg), buildHealth(cfg), nil), down
 }
 
 func TestBuildExecutorAppliesTheReliabilitySettings(t *testing.T) {

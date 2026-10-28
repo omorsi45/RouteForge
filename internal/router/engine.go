@@ -13,6 +13,7 @@ import (
 	"github.com/omorsi45/routeforge/internal/accounting"
 	"github.com/omorsi45/routeforge/internal/config"
 	"github.com/omorsi45/routeforge/internal/policy"
+	"github.com/omorsi45/routeforge/internal/telemetry"
 )
 
 // Signals are the live inputs to eligibility. A nil function means the model
@@ -38,12 +39,14 @@ type Signals struct {
 }
 
 // EngineOptions configures an Engine. Nil NewID and Now use NewDecisionID and
-// time.Now. Nil Policies behaves like a registry with no active policy.
+// time.Now. Nil Policies behaves like a registry with no active policy. Nil
+// Metrics records nothing.
 type EngineOptions struct {
 	Models   []config.Model
 	Prices   map[string]accounting.Price // by configured model name
 	Policies *policy.Registry
 	Signals  Signals
+	Metrics  *telemetry.Metrics
 	NewID    func() string
 	Now      func() time.Time
 }
@@ -59,6 +62,7 @@ type Engine struct {
 	prices   map[string]accounting.Price
 	policies *policy.Registry
 	signals  Signals
+	metrics  *telemetry.Metrics
 	newID    func() string
 	now      func() time.Time
 }
@@ -70,6 +74,7 @@ func NewEngine(o EngineOptions) *Engine {
 		prices:   maps.Clone(o.Prices),
 		policies: o.Policies,
 		signals:  o.Signals,
+		metrics:  o.Metrics,
 		newID:    o.NewID,
 		now:      o.Now,
 	}
@@ -248,8 +253,27 @@ func (e *Engine) Decide(ctx context.Context, req *Request) (*Decision, error) {
 	if err != nil && !errors.Is(err, ErrNoEligibleModel) && !errors.Is(err, ErrOverloaded) {
 		return nil, err
 	}
-	d.DecidedInUS = time.Since(start).Microseconds()
+	took := time.Since(start)
+	d.DecidedInUS = took.Microseconds()
+	e.recordDecision(d, took)
 	return d, err
+}
+
+// recordDecision reports a finished decision: how long it took, and, when a
+// model was chosen, the choice and the calibrated p of the chosen model. A
+// pinned decision is not scored, so it has no p.
+func (e *Engine) recordDecision(d *Decision, took time.Duration) {
+	e.metrics.DecisionTime(took)
+	if d.Chosen == "" {
+		return
+	}
+	e.metrics.Decision(d.Chosen, d.Reason, d.Strategy, d.PolicyVersion)
+	for _, c := range d.Candidates {
+		if c.Model == d.Chosen && c.P != nil {
+			e.metrics.PredictedSuccess(c.Model, *c.P)
+			break
+		}
+	}
 }
 
 // routePinned serves a request for one named model: the model must exist, be

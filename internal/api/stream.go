@@ -142,6 +142,10 @@ func (s *Server) serveStream(w http.ResponseWriter, r *http.Request, st *chatSta
 	if !flush() {
 		return
 	}
+	// The first byte has gone out. The gateway's share of the time to get here
+	// excludes what the attempts spent upstream: the failed ones before, and
+	// the wait for the first event of this one, which has been read already.
+	s.observeOverhead(true, s.now().Sub(info.start)-upstreamTime(st.decision)-stream.TTFT())
 
 	cw := &chunkWriter{
 		id:           st.completionID,

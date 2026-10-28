@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"math"
 	"net/http"
 	"slices"
 	"strconv"
@@ -210,12 +211,14 @@ func (s *Server) readChat(w http.ResponseWriter, r *http.Request) (*chatCall, *E
 
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	info := infoFrom(r.Context())
+	info.chat = true
 	call, aerr := s.readChat(w, r)
 	if aerr != nil {
 		writeError(w, aerr)
 		return
 	}
 	defer call.cancel()
+	info.profile, info.strategy = call.rreq.Profile, call.rreq.Strategy
 
 	// Admission follows the body check and precedes routing, and nothing is
 	// reserved until a decision has been made: a request refused for its rate
@@ -232,6 +235,10 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	d, err := s.router.Decide(call.ctx, call.rreq)
+	if d != nil {
+		// A refused decision still says how the request was meant to be routed.
+		info.strategy, info.policyVersion = d.Strategy, d.PolicyVersion
+	}
 	if err != nil {
 		writeError(w, fromRouterError(err))
 		return
@@ -264,6 +271,14 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 // serveJSON runs the non-streaming call and writes the completion.
 func (s *Server) serveJSON(w http.ResponseWriter, r *http.Request, st *chatState, preq provider.Request) {
+	// The overhead is what the request took here minus what its attempts took
+	// upstream. It is measured once, as the handler returns, whatever the
+	// outcome.
+	start := infoFrom(r.Context()).start
+	defer func() {
+		s.observeOverhead(false, s.now().Sub(start)-upstreamTime(st.decision))
+	}()
+
 	res, err := s.exec.Complete(st.deadlineCtx, st.decision, preq, st.execMeter())
 	// The executor has recorded the attempt, so the decision is final. Store
 	// it before replying so a client that has the response can read it back.
@@ -302,6 +317,24 @@ func (s *Server) serveJSON(w http.ResponseWriter, r *http.Request, st *chatState
 	}
 	w.Header().Set("X-RouteForge-Model", res.Model)
 	s.writeJSON(w, r, http.StatusOK, resp)
+}
+
+// upstreamTime is the time the attempts recorded on d have spent upstream. An
+// attempt that is still open is not in it.
+func upstreamTime(d *router.Decision) time.Duration {
+	var total time.Duration
+	for _, a := range d.Attempts {
+		// DurationMS has microsecond resolution (Ruling R8).
+		total += time.Duration(math.Round(a.DurationMS*1000)) * time.Microsecond
+	}
+	return total
+}
+
+// observeOverhead records the time the gateway itself added to one request.
+// The server and the executor read the same clock in production; a test clock
+// that disagrees could make the figure negative, which is recorded as zero.
+func (s *Server) observeOverhead(stream bool, d time.Duration) {
+	s.metrics.GatewayOverhead(stream, max(d, 0))
 }
 
 // routingHeaders validates X-RouteForge-Profile and X-RouteForge-Strategy.

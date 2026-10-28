@@ -50,12 +50,13 @@ type Registry struct {
 	now        func() time.Time
 	active     atomic.Pointer[Policy]
 
-	mu       sync.Mutex
-	entries  map[string]*Entry
-	versions []string // in the order added
-	current  string   // active version, empty before the first activation
-	previous string   // version active before current, empty if none
-	log      []Activation
+	mu         sync.Mutex
+	entries    map[string]*Entry
+	versions   []string // in the order added
+	current    string   // active version, empty before the first activation
+	previous   string   // version active before current, empty if none
+	log        []Activation
+	onActivate func(Activation)
 }
 
 // NewRegistry returns an empty registry. configured lists the policy_name of
@@ -122,6 +123,17 @@ func (r *Registry) Rollback(actor string) (Activation, error) {
 	return r.switchTo(r.entries[r.previous], StatusInactive, actor), nil
 }
 
+// OnActivate registers fn to be told of every change of the active policy,
+// replacing any earlier hook; nil removes it. fn runs once for each Activate or
+// Rollback that changes the active policy, in the order the changes happen,
+// while the registry is locked: it must be quick and must not call the
+// registry. It is not called for the policy active when it is registered.
+func (r *Registry) OnActivate(fn func(Activation)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onActivate = fn
+}
+
 // switchTo activates target, gives the policy it replaces the status
 // replaced, and records the change. The caller holds r.mu.
 func (r *Registry) switchTo(target *Entry, replaced, actor string) Activation {
@@ -134,6 +146,9 @@ func (r *Registry) switchTo(target *Entry, replaced, actor string) Activation {
 	act := Activation{Version: r.current, Previous: prev, Actor: actor, At: r.now()}
 	r.log = append(r.log, act)
 	r.active.Store(target.Policy)
+	if r.onActivate != nil {
+		r.onActivate(act)
+	}
 	return act
 }
 

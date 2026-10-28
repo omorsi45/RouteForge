@@ -18,6 +18,7 @@ import (
 	"github.com/omorsi45/routeforge/internal/reliability"
 	"github.com/omorsi45/routeforge/internal/router"
 	"github.com/omorsi45/routeforge/internal/store"
+	"github.com/omorsi45/routeforge/internal/telemetry"
 )
 
 // decisionRingSize is how many routing decisions the gateway keeps for
@@ -29,17 +30,20 @@ const decisionRingSize = 10000
 const usageRecordsKept = 100000
 
 // gateway is a built gateway: its HTTP surface, and the accounting behind it,
-// which the invariant tests read to check the books.
+// which the invariant tests read to check the books, and the metrics it
+// reports to, which GET /metrics serves.
 type gateway struct {
 	*api.Server
 	accountant *accounting.Accountant
 	usage      *accounting.MemoryUsage
+	metrics    *telemetry.Metrics
 }
 
 // buildGateway constructs the HTTP surface over cfg: providers, prices, the
 // policy registry, the latency estimators, the model queues, the circuit
 // breakers, the accountant, the routing engine and the executor that retries
 // and fails over. Without a policy the engine routes like the basic router.
+// Every component reports to one set of metrics.
 func buildGateway(cfg *config.Config, getenv func(string) string, logger *slog.Logger) (*gateway, error) {
 	// No client Timeout: streams outlive any fixed value, so deadlines come
 	// from request contexts.
@@ -56,11 +60,15 @@ func buildGateway(cfg *config.Config, getenv func(string) string, logger *slog.L
 	if err != nil {
 		return nil, err
 	}
+	metrics := telemetry.NewMetrics()
+	watchPolicy(reg, metrics)
 	latency := buildHealth(cfg)
 	queues := buildQueues(cfg)
 	breakers := buildBreakers(cfg)
+	inflight := reliability.NewInFlight(cfg.Server.MaxInFlight)
+	metrics.SetStateSources(stateSources(cfg, breakers, queues, inflight))
 	usage := accounting.NewMemoryUsage(usageRecordsKept)
-	acct := buildAccountant(cfg, prices, usage, logger)
+	acct := buildAccountant(cfg, prices, usage, logger, metrics)
 
 	opts := api.Options{
 		Config: cfg,
@@ -75,18 +83,20 @@ func buildGateway(cfg *config.Config, getenv func(string) string, logger *slog.L
 				PredictedP95MS:       latency.PredictedP95MS,
 				BudgetRemainingNanos: acct.RemainingNanos,
 			},
+			Metrics: metrics,
 		}),
-		Executor:   buildExecutor(cfg, providers, breakers, queues, latency),
+		Executor:   buildExecutor(cfg, providers, breakers, queues, latency, metrics),
 		Accountant: acct,
 		Decisions:  store.NewRing(decisionRingSize),
 		Policies:   reg,
-		InFlight:   reliability.NewInFlight(cfg.Server.MaxInFlight),
+		InFlight:   inflight,
+		Metrics:    metrics,
 		Logger:     logger,
 	}
 	if cfg.Policy.Path != "" {
 		opts.ReadyChecks = []api.ReadyCheck{policyReadyCheck(reg)}
 	}
-	return &gateway{Server: api.New(opts), accountant: acct, usage: usage}, nil
+	return &gateway{Server: api.New(opts), accountant: acct, usage: usage, metrics: metrics}, nil
 }
 
 // serve runs the gateway on ln until ctx ends, then drains: /readyz turns

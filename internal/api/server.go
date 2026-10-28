@@ -20,6 +20,7 @@ import (
 	"github.com/omorsi45/routeforge/internal/reliability"
 	"github.com/omorsi45/routeforge/internal/router"
 	"github.com/omorsi45/routeforge/internal/store"
+	"github.com/omorsi45/routeforge/internal/telemetry"
 )
 
 // readyCheckTimeout bounds each readiness check.
@@ -47,6 +48,7 @@ type Options struct {
 	Decisions   store.DecisionStore    // nil: a ring of 10,000 decisions
 	Policies    *policy.Registry       // the registry the router reads; may be nil, and then the policy admin routes do not exist
 	InFlight    *reliability.InFlight  // limits concurrent chat and explain requests; nil means no limit
+	Metrics     *telemetry.Metrics     // counts requests and serves GET /metrics; nil means no metrics and no /metrics route
 	Logger      *slog.Logger           // nil: slog.New(slog.DiscardHandler)
 	Now         func() time.Time       // nil: time.Now
 	ReadyChecks []ReadyCheck
@@ -63,6 +65,7 @@ type Server struct {
 	decisions store.DecisionStore
 	policies  *policy.Registry
 	inflight  *reliability.InFlight
+	metrics   *telemetry.Metrics
 	logger    *slog.Logger
 	now       func() time.Time
 	checks    []ReadyCheck
@@ -81,6 +84,7 @@ func New(o Options) *Server {
 		decisions: o.Decisions,
 		policies:  o.Policies,
 		inflight:  o.InFlight,
+		metrics:   o.Metrics,
 		logger:    o.Logger,
 		now:       o.Now,
 		checks:    o.ReadyChecks,
@@ -115,6 +119,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/models", s.handleModels)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /readyz", s.handleReadyz)
+	if s.metrics != nil {
+		// No authentication: restrict the endpoint at the proxy.
+		mux.Handle("GET /metrics", s.metrics.Handler())
+	}
 	return s.withRequestID(s.withAccessLog(mux))
 }
 
@@ -140,6 +148,16 @@ type reqInfo struct {
 	tenant     string
 	model      string
 	decisionID string
+	// start is when the access-log middleware began the request.
+	start time.Time
+	// chat marks a chat completion request, the only kind that is counted in
+	// routeforge_requests_total. The routing fields below are those of its
+	// decision (or of the request, until there is one) and stay empty when the
+	// request failed before routing.
+	chat          bool
+	strategy      string
+	profile       string
+	policyVersion string
 	// streamOpen is set while an event stream has been started and has not
 	// ended with [DONE] or a terminal error event. A request whose context was
 	// canceled in that state left its client with an incomplete response.
@@ -224,9 +242,10 @@ func clientGone(ctx context.Context, written int, info *reqInfo) bool {
 func (s *Server) withAccessLog(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := s.now()
+		info := infoFrom(r.Context())
+		info.start = start
 		rec := &statusRecorder{ResponseWriter: w}
 		next.ServeHTTP(rec, r)
-		info := infoFrom(r.Context())
 		status := rec.status
 		if status == 0 {
 			status = http.StatusOK
@@ -234,6 +253,9 @@ func (s *Server) withAccessLog(next http.Handler) http.Handler {
 		gone := clientGone(r.Context(), rec.status, info)
 		if gone {
 			status = statusClientGone
+		}
+		if info.chat {
+			s.metrics.Request(info.model, info.strategy, info.profile, info.policyVersion, status)
 		}
 		s.logger.LogAttrs(r.Context(), slog.LevelInfo, "request",
 			slog.String("request_id", info.requestID),

@@ -20,6 +20,7 @@ import (
 	"github.com/omorsi45/routeforge/internal/provider/openai"
 	"github.com/omorsi45/routeforge/internal/provider/replay"
 	"github.com/omorsi45/routeforge/internal/reliability"
+	"github.com/omorsi45/routeforge/internal/telemetry"
 )
 
 // startupActor is recorded as the actor of the activation at startup.
@@ -153,8 +154,9 @@ func buildBreakers(cfg *config.Config) *reliability.Breakers {
 
 // buildExecutor returns the executor over the configured models: retries and
 // failover as reliability sets them, guarded by the breakers and queues and
-// feeding the latency estimators with every successful call.
-func buildExecutor(cfg *config.Config, providers map[string]provider.Provider, breakers *reliability.Breakers, queues *reliability.Queues, latency *health.Registry) *executor.Executor {
+// feeding the latency estimators with every successful call. Its attempts are
+// reported to metrics, which may be nil.
+func buildExecutor(cfg *config.Config, providers map[string]provider.Provider, breakers *reliability.Breakers, queues *reliability.Queues, latency *health.Registry, metrics *telemetry.Metrics) *executor.Executor {
 	r := cfg.Reliability
 	return executor.NewWithOptions(executor.Options{
 		Targets:     buildTargets(cfg, providers),
@@ -164,13 +166,15 @@ func buildExecutor(cfg *config.Config, providers map[string]provider.Provider, b
 		Backoff:     reliability.Backoff{Base: r.BackoffBase, Cap: r.BackoffCap},
 		Health:      latency,
 		MaxAttempts: r.MaxAttempts,
+		Metrics:     metrics,
 	})
 }
 
 // buildAccountant returns the accountant of cfg over in-memory budgets, rate
 // limits and the given usage store, priced by prices. It admits and meters
-// requests as accounting.fail_mode says.
-func buildAccountant(cfg *config.Config, prices map[string]accounting.Price, usage accounting.UsageStore, logger *slog.Logger) *accounting.Accountant {
+// requests as accounting.fail_mode says and reports to metrics, which may be
+// nil.
+func buildAccountant(cfg *config.Config, prices map[string]accounting.Price, usage accounting.UsageStore, logger *slog.Logger, metrics *telemetry.Metrics) *accounting.Accountant {
 	return accounting.NewAccountant(accounting.AccountantOptions{
 		Tenants:  cfg.Tenants,
 		Prices:   prices,
@@ -179,7 +183,32 @@ func buildAccountant(cfg *config.Config, prices map[string]accounting.Price, usa
 		Usage:    usage,
 		FailMode: cfg.Accounting.FailMode,
 		Logger:   logger,
+		Metrics:  metrics,
 	})
+}
+
+// watchPolicy makes metrics follow the active policy of reg: policy_info names
+// the active version now and after every activation and rollback.
+func watchPolicy(reg *policy.Registry, metrics *telemetry.Metrics) {
+	if active := reg.Active(); active != nil {
+		metrics.PolicyActivated(active.Version, "")
+	}
+	reg.OnActivate(func(a policy.Activation) { metrics.PolicyActivated(a.Version, a.Previous) })
+}
+
+// stateSources tells the state gauges where to read the breakers, queues and
+// in-flight count of the configured models.
+func stateSources(cfg *config.Config, breakers *reliability.Breakers, queues *reliability.Queues, inflight *reliability.InFlight) telemetry.StateSources {
+	models := make([]string, len(cfg.Models))
+	for i, m := range cfg.Models {
+		models[i] = m.Name
+	}
+	return telemetry.StateSources{
+		Models:       models,
+		BreakerState: func(model string) int { return int(breakers.State(model)) },
+		QueueDepth:   queues.Depth,
+		InFlight:     inflight.Count,
+	}
 }
 
 // buildTargets binds each configured model to its provider's instance.

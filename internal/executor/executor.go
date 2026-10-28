@@ -29,6 +29,7 @@ import (
 	"github.com/omorsi45/routeforge/internal/provider"
 	"github.com/omorsi45/routeforge/internal/reliability"
 	"github.com/omorsi45/routeforge/internal/router"
+	"github.com/omorsi45/routeforge/internal/telemetry"
 )
 
 // ErrNoTargetAccepted means every target was skipped, by an open breaker or a
@@ -86,6 +87,9 @@ type Options struct {
 	// Sleep waits for d or until ctx ends, returning ctx's error then. Nil
 	// waits on a timer.
 	Sleep func(ctx context.Context, d time.Duration) error
+	// Metrics receives the attempt durations, first-event times, retries and
+	// failovers; nil records none.
+	Metrics *telemetry.Metrics
 }
 
 // Executor calls providers on behalf of routing decisions. It is safe for
@@ -100,6 +104,7 @@ type Executor struct {
 	health      *health.Registry
 	maxAttempts int
 	sleep       func(context.Context, time.Duration) error
+	metrics     *telemetry.Metrics
 }
 
 // New returns an Executor over targets keyed by configured model name that
@@ -121,6 +126,7 @@ func NewWithOptions(o Options) *Executor {
 		health:      o.Health,
 		maxAttempts: max(o.MaxAttempts, 1),
 		sleep:       o.Sleep,
+		metrics:     o.Metrics,
 	}
 	if e.now == nil {
 		e.now = time.Now
@@ -201,6 +207,7 @@ func (e *Executor) Stream(ctx context.Context, d *router.Decision, req provider.
 		}
 		if err == nil {
 			s.ttft, s.hasTTFT = e.now().Sub(a.start), true
+			e.metrics.UpstreamTTFT(a.target.Model, s.ttft)
 		}
 		return nil
 	})
@@ -223,9 +230,10 @@ func (e *Executor) run(ctx context.Context, d *router.Decision, m Meter, try fun
 	}
 
 	var (
-		calls int   // upstream calls made
-		pos   int   // the next target to try
-		prev  error // the error of the last upstream call
+		calls     int    // upstream calls made
+		pos       int    // the next target to try
+		prev      error  // the error of the last upstream call
+		prevModel string // the model the last upstream call went to
 	)
 	for calls < e.maxAttempts {
 		if calls > 0 && !e.mayRetry(ctx, calls, prev) {
@@ -235,7 +243,9 @@ func (e *Executor) run(ctx context.Context, d *router.Decision, m Meter, try fun
 		if err != nil {
 			return err
 		}
+		e.countRetry(d, calls, prevModel, prev, a.target.Model)
 		calls++
+		prevModel = a.target.Model
 		if err = a.run(try); err == nil {
 			return nil
 		}
@@ -243,6 +253,23 @@ func (e *Executor) run(ctx context.Context, d *router.Decision, m Meter, try fun
 		pos = min(pos+1, len(targets)-1)
 	}
 	return prev
+}
+
+// countRetry reports that the call about to be made is a retry (calls is the
+// number made so far), counted against the model whose call failed with the
+// kind of its error, and a failover when it goes to another model than the one
+// before it, or, for a first call, than the decision's choice: the chosen
+// model's breaker or queue refused it. A retry is counted only here, once
+// admission has accepted it, so a retry that no model accepts is not one.
+func (e *Executor) countRetry(d *router.Decision, calls int, prevModel string, prev error, model string) {
+	from := d.Chosen
+	if calls > 0 {
+		from = prevModel
+		e.metrics.Retry(prevModel, string(provider.KindOf(prev)))
+	}
+	if model != from {
+		e.metrics.Failover()
+	}
 }
 
 // resolve returns the targets of d in order: the chosen model, then the
@@ -424,6 +451,7 @@ func (a *attempt) end(r ending) {
 		defer a.release()
 
 		dur := a.e.now().Sub(a.start)
+		a.e.metrics.UpstreamDuration(a.target.Model, r.outcome, dur)
 		var kind provider.ErrorKind
 		if r.err != nil && r.outcome != router.OutcomeCanceled {
 			kind = provider.KindOf(r.err)
@@ -476,6 +504,11 @@ type Stream struct {
 	closeOnce sync.Once
 	closeErr  error
 }
+
+// TTFT is the time from the start of the attempt to its first event, which is
+// what the executor waited on the upstream before it returned the stream. It is
+// zero for a stream that ended without an event.
+func (s *Stream) TTFT() time.Duration { return s.ttft }
 
 // Recv returns the next event: the primed one first, then the provider's.
 func (s *Stream) Recv() (provider.StreamEvent, error) {

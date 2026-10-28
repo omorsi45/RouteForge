@@ -14,6 +14,7 @@ import (
 
 	"github.com/omorsi45/routeforge/internal/config"
 	"github.com/omorsi45/routeforge/internal/provider"
+	"github.com/omorsi45/routeforge/internal/telemetry"
 )
 
 // Attempt outcomes, repeated from the router package, which imports this one
@@ -106,9 +107,10 @@ type AccountantOptions struct {
 	// FailMode is config.FailModeOpen to let requests through when a backend
 	// fails; any other value, the empty one included, fails closed.
 	FailMode string
-	Now      func() time.Time // nil: time.Now
-	Logger   *slog.Logger     // nil: logs nothing
-	NewID    func() string    // usage record ids; nil: "usage_" and 24 hex characters
+	Now      func() time.Time   // nil: time.Now
+	Logger   *slog.Logger       // nil: logs nothing
+	NewID    func() string      // usage record ids; nil: "usage_" and 24 hex characters
+	Metrics  *telemetry.Metrics // nil: records no metrics
 }
 
 // Accountant admits requests and meters their attempts: it enforces rate
@@ -124,6 +126,7 @@ type Accountant struct {
 	now      func() time.Time
 	logger   *slog.Logger
 	newID    func() string
+	metrics  *telemetry.Metrics
 
 	logMu   sync.Mutex
 	lastLog map[string]time.Time // when each backend was last named in the log
@@ -143,6 +146,7 @@ func NewAccountant(o AccountantOptions) *Accountant {
 		now:      o.Now,
 		logger:   o.Logger,
 		newID:    o.NewID,
+		metrics:  o.Metrics,
 		lastLog:  make(map[string]time.Time),
 	}
 	for i := range tenants {
@@ -249,6 +253,7 @@ func (a *Accountant) allow(ctx context.Context, tenant, kind string, n, perMinut
 		return a.backendFailure(ctx, backendLimiter, err)
 	}
 	if !d.OK {
+		a.metrics.RateLimited(kind)
 		return &RateLimitedError{Kind: kind, RetryAfter: d.RetryAfter}
 	}
 	return nil
@@ -338,6 +343,7 @@ func (m *Meter) Begin(ctx context.Context, model string) (Charge, error) {
 				return nil, err
 			}
 		case !ok:
+			a.metrics.BudgetRejected()
 			return nil, &BudgetExceededError{RetryAfter: untilNextDay(a.now())}
 		default:
 			held = reserve
@@ -430,10 +436,17 @@ func (c *charge) settle(s Settlement) {
 	// passed), but the money was spent all the same.
 	ctx, cancel := context.WithTimeout(c.ctx, settleTimeout)
 	defer cancel()
-	// The overshoot the store returns is kept by the store; State reports it.
-	if _, err := a.budgets.Settle(ctx, c.key, c.reserved, cost, c.limit); err != nil {
+	overshoot, err := a.budgets.Settle(ctx, c.key, c.reserved, cost, c.limit)
+	if err != nil {
 		a.logBackend(ctx, backendBudget, err)
 	}
+	// The store keeps the running overshoot; State reports it. The metric adds
+	// what this settlement contributed, so its total follows the store's.
+	if err == nil && overshoot > 0 {
+		a.metrics.BudgetOvershoot(c.m.t.Name, NanosToUSD(overshoot))
+	}
+	a.metrics.Cost(c.model, source, NanosToUSD(cost))
+	a.metrics.Tokens(c.model, source, prompt, completion)
 	rec := UsageRecord{
 		ID:               a.newID(),
 		RequestID:        c.m.requestID,
