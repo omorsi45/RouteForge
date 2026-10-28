@@ -53,7 +53,8 @@ type StreamEvent struct {
 // Events arrive in order. A clean end is io.EOF. An upstream failure is a
 // *Error. Caller cancellation returns an error satisfying
 // errors.Is(err, context.Canceled). Deadline expiry is *Error{Kind:
-// KindTimeout}. Close is idempotent and safe after io.EOF.
+// KindTimeout}. Close is idempotent and safe after io.EOF. Close may be called
+// concurrently with Recv.
 type Stream interface {
 	Recv() (StreamEvent, error)
 	Close() error

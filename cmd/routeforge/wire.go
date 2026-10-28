@@ -10,6 +10,7 @@ import (
 	"github.com/omorsi45/routeforge/internal/api"
 	"github.com/omorsi45/routeforge/internal/config"
 	"github.com/omorsi45/routeforge/internal/executor"
+	"github.com/omorsi45/routeforge/internal/health"
 	"github.com/omorsi45/routeforge/internal/policy"
 	"github.com/omorsi45/routeforge/internal/provider"
 	"github.com/omorsi45/routeforge/internal/provider/anthropic"
@@ -104,6 +105,18 @@ func buildProviders(cfg *config.Config, getenv func(string) string, client *http
 		}
 	}
 	return out, nil
+}
+
+// buildHealth returns the latency estimators of the configured models, keyed
+// by configured name and seeded from each model's latency_prior. Until calls
+// are observed their predictions equal the trainer's offline ones.
+func buildHealth(cfg *config.Config) *health.Registry {
+	priors := make(map[string]health.Prior, len(cfg.Models))
+	for _, m := range cfg.Models {
+		lp := m.LatencyPrior
+		priors[m.Name] = health.Prior{TTFTMS: lp.TTFTMS, DecodeTokensPerS: lp.DecodeTokensPerS, Jitter: lp.Jitter}
+	}
+	return health.NewRegistry(priors, health.DefaultAlpha)
 }
 
 // buildTargets binds each configured model to its provider's instance.

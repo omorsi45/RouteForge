@@ -330,6 +330,86 @@ func TestStreamRecvHonorsCancelAndClose(t *testing.T) {
 	}
 }
 
+func TestFakeRecvHonorsCanceledContextOnFirstEvent(t *testing.T) {
+	p := fake.New("f", baseCfg())
+	cctx, cancel := context.WithCancel(ctx)
+	s, err := p.Stream(cctx, req())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	cancel()
+	// PerToken is zero, so no sleep would notice the cancel: Recv must check.
+	if ev, err := s.Recv(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("first Recv = %+v, %v; want context.Canceled", ev, err)
+	}
+	if _, err := s.Recv(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Recv after the failure = %v, want the same sticky error", err)
+	}
+}
+
+func TestFakeRecvHonorsCanceledContextBeforeFinal(t *testing.T) {
+	cfg := baseCfg()
+	cfg.OutputTokens = 2
+	p := fake.New("f", cfg)
+	cctx, cancel := context.WithCancel(ctx)
+	s, err := p.Stream(cctx, req())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	for i := range 2 {
+		if _, err := s.Recv(); err != nil {
+			t.Fatalf("Recv %d: %v", i, err)
+		}
+	}
+	cancel()
+	if ev, err := s.Recv(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Recv for the final event = %+v, %v; want context.Canceled", ev, err)
+	}
+}
+
+func TestFakeDisconnectPathChecksContext(t *testing.T) {
+	p := fake.New("f", config.Fake{Seed: 1, OutputTokens: 5, DisconnectRate: 1, DisconnectAfter: 1, ErrorKind: provider.KindUnavailable})
+	cctx, cancel := context.WithCancel(ctx)
+	s, err := p.Stream(cctx, req())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err := s.Recv(); err != nil {
+		t.Fatalf("Recv before the disconnect: %v", err)
+	}
+	cancel()
+	// The disconnect is due now; a canceled caller sees its own cancellation,
+	// not the injected upstream failure.
+	_, err = s.Recv()
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Recv at the disconnect = %v, want context.Canceled", err)
+	}
+	var pe *provider.Error
+	if errors.As(err, &pe) {
+		t.Fatalf("err = %+v, want the cancellation, not a provider error", pe)
+	}
+}
+
+func TestFakeRecvHonorsExpiredDeadline(t *testing.T) {
+	p := fake.New("f", baseCfg())
+	dctx, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
+	defer cancel()
+	s, err := p.Stream(dctx, req())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	<-dctx.Done()
+	_, err = s.Recv()
+	var pe *provider.Error
+	if !errors.As(err, &pe) || pe.Kind != provider.KindTimeout || pe.Provider != "f" {
+		t.Fatalf("Recv = %v, want a timeout *provider.Error from f", err)
+	}
+}
+
 func TestTTFTApplied(t *testing.T) {
 	p := fake.New("f", config.Fake{Seed: 1, OutputTokens: 3, TTFT: 30 * time.Millisecond, ErrorKind: provider.KindUnavailable, DisconnectAfter: 1})
 	start := time.Now()

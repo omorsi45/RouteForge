@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -439,6 +440,80 @@ func TestReplayBenchConfig(t *testing.T) {
 	}
 	if want := "config OK: 1 tenants, 1 providers, 6 models, policy " + pol.Version + "\n"; out != want {
 		t.Fatalf("stdout = %q, want %q", out, want)
+	}
+}
+
+func TestBuildHealthUsesConfiguredPriors(t *testing.T) {
+	cfg := parsePoolConfig(t, "m-", poolPolicyNames...)
+	for i := range cfg.Models {
+		cfg.Models[i].LatencyPrior = config.LatencyPrior{
+			TTFTMS:           float64(100 * (i + 1)),
+			DecodeTokensPerS: float64(10 * (i + 1)),
+			Jitter:           0.1,
+		}
+	}
+	hr := buildHealth(cfg)
+	for i, m := range cfg.Models {
+		lp := m.LatencyPrior
+		want := (lp.TTFTMS + 1000*250/lp.DecodeTokensPerS) * (1 + 1.645*lp.Jitter/math.Sqrt(3))
+		if got := hr.PredictedP95MS(m.Name, 250); math.Abs(got-want) > 1e-9 {
+			t.Errorf("models[%d] %s: PredictedP95MS = %v, want %v", i, m.Name, got, want)
+		}
+	}
+	// Estimators are keyed by configured name, not by policy name.
+	if got := hr.PredictedP95MS("gpt-5", 250); !math.IsInf(got, 1) {
+		t.Errorf("PredictedP95MS(policy name) = %v, want +Inf", got)
+	}
+}
+
+func TestGatewayRoutesWithLatencyPriors(t *testing.T) {
+	cfg, err := config.Load("../../deploy/configs/policy-fake.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pol, err := policy.LoadFile("../../trainer/artifacts/policy.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range cfg.Providers {
+		cfg.Providers[i].Fake.TTFT = 0
+		cfg.Providers[i].Fake.PerToken = 0
+	}
+	base, _ := startGatewayConfig(t, cfg, slog.New(slog.DiscardHandler))
+
+	const body = `{"model":"routeforge-auto","messages":[{"role":"user","content":"hello"}]}`
+	resp, raw := apiRequest(t, http.MethodPost, base+"/v1/routing/explain", demoKey, body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("explain status %d, body %s", resp.StatusCode, raw)
+	}
+	var d struct {
+		Candidates []struct {
+			Model          string   `json:"model"`
+			PredictedP95MS *float64 `json:"predicted_p95_ms"`
+		} `json:"candidates"`
+	}
+	if err := json.Unmarshal(raw, &d); err != nil {
+		t.Fatalf("decode %s: %v", raw, err)
+	}
+	if len(d.Candidates) != len(pol.Models) {
+		t.Fatalf("got %d candidates, want %d", len(d.Candidates), len(pol.Models))
+	}
+	for _, c := range d.Candidates {
+		m, ok := cfg.Model(c.Model)
+		if !ok {
+			t.Fatalf("candidate %q is not a configured model", c.Model)
+		}
+		var eot float64
+		for _, pm := range pol.Models {
+			if pm.Name == m.PolicyName {
+				eot = pm.ExpectedOutputTokens
+			}
+		}
+		lp := m.LatencyPrior
+		want := (lp.TTFTMS + 1000*eot/lp.DecodeTokensPerS) * (1 + 1.645*lp.Jitter/math.Sqrt(3))
+		if c.PredictedP95MS == nil || math.Abs(*c.PredictedP95MS-want) > 1e-6 {
+			t.Errorf("%s: predicted_p95_ms = %v, want %v", c.Model, c.PredictedP95MS, want)
+		}
 	}
 }
 

@@ -24,8 +24,8 @@ import (
 const decisionRingSize = 10000
 
 // buildGateway constructs the HTTP surface over cfg: providers, prices, the
-// policy registry and the routing engine. Without a policy the engine routes
-// like the basic router.
+// policy registry, the latency estimators and the routing engine. Without a
+// policy the engine routes like the basic router.
 func buildGateway(cfg *config.Config, getenv func(string) string, logger *slog.Logger) (*api.Server, error) {
 	// No client Timeout: streams outlive any fixed value, so deadlines come
 	// from request contexts.
@@ -42,6 +42,7 @@ func buildGateway(cfg *config.Config, getenv func(string) string, logger *slog.L
 	if err != nil {
 		return nil, err
 	}
+	latency := buildHealth(cfg)
 
 	opts := api.Options{
 		Config: cfg,
@@ -50,6 +51,7 @@ func buildGateway(cfg *config.Config, getenv func(string) string, logger *slog.L
 			Models:   cfg.Models,
 			Prices:   prices,
 			Policies: reg,
+			Signals:  router.Signals{PredictedP95MS: latency.PredictedP95MS},
 		}),
 		Executor:  executor.New(buildTargets(cfg, providers), nil),
 		Decisions: store.NewRing(decisionRingSize),

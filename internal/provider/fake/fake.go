@@ -210,6 +210,10 @@ func (s *stream) recv() (provider.StreamEvent, error) {
 	default:
 	}
 	if s.c.disconnect && s.next >= s.disconnectAfter {
+		// A canceled caller sees its own cancellation, not the injected failure.
+		if err := s.canceled(); err != nil {
+			return provider.StreamEvent{}, err
+		}
 		return provider.StreamEvent{}, &provider.Error{
 			Kind:     provider.KindUnavailable,
 			Provider: s.p.name,
@@ -221,6 +225,9 @@ func (s *stream) recv() (provider.StreamEvent, error) {
 			if err := s.p.sleep(s.ctx, s.done, s.c, s.p.cfg.PerToken); err != nil {
 				return provider.StreamEvent{}, err
 			}
+		} else if err := s.canceled(); err != nil {
+			// The first event waits for nothing, so nothing else would notice.
+			return provider.StreamEvent{}, err
 		}
 		delta := s.c.words[s.next]
 		if s.next > 0 {
@@ -229,9 +236,21 @@ func (s *stream) recv() (provider.StreamEvent, error) {
 		s.next++
 		return provider.StreamEvent{Delta: delta}, nil
 	}
+	if err := s.canceled(); err != nil {
+		return provider.StreamEvent{}, err
+	}
 	// The final event is followed by io.EOF through the sticky error.
 	s.err = io.EOF
 	return provider.StreamEvent{FinishReason: s.c.finish, Usage: s.c.usage}, nil
+}
+
+// canceled returns the transport error for a caller whose context has ended,
+// or nil while it is live.
+func (s *stream) canceled() error {
+	if err := s.ctx.Err(); err != nil {
+		return provider.TransportError(s.ctx, s.p.name, err)
+	}
+	return nil
 }
 
 // Close releases the stream and wakes a blocked Recv. It is idempotent.
