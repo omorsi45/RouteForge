@@ -7,7 +7,7 @@ VPY := $(VENV)/bin/python
 TRAIN := OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONPATH=trainer $(VPY) -m routeforge_train --root .
 EXTRACTION_MODELS ?=
 
-.PHONY: check fmt-check vet build tidy-check validate-configs test test-race vuln py-setup py-check py-test data train evaluate label-extraction
+.PHONY: check fmt-check vet build tidy-check validate-configs test test-race test-integration vuln py-setup py-check py-test data train evaluate label-extraction
 
 check: fmt-check vet build tidy-check validate-configs
 
@@ -31,6 +31,9 @@ test:
 
 test-race:
 	$(GO) test -race -count=1 ./...
+
+test-integration:
+	$(GO) test -tags integration -count=1 ./...
 
 vuln:
 	$(GO) run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
