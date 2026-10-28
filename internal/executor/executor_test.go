@@ -7,6 +7,7 @@ import (
 	"io"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/omorsi45/routeforge/internal/executor"
 	"github.com/omorsi45/routeforge/internal/provider"
@@ -128,6 +129,45 @@ func TestCompleteSetsUpstreamAndRecordsAttempt(t *testing.T) {
 	a := oneAttempt(t, d)
 	if a.Model != "m" || a.Outcome != router.OutcomeOK || a.ErrorKind != "" {
 		t.Fatalf("attempt = %+v", a)
+	}
+}
+
+// steppingClock returns a clock that advances by step on every call.
+func steppingClock(step time.Duration) func() time.Time {
+	now := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
+	return func() time.Time {
+		now = now.Add(step)
+		return now
+	}
+}
+
+// The recorded duration is fractional milliseconds with microsecond
+// resolution, so a sub-millisecond upstream time survives.
+func TestAttemptDurationHasMicrosecondResolution(t *testing.T) {
+	cases := []struct {
+		name string
+		step time.Duration
+		want float64
+	}{
+		{"one and a half milliseconds", 1500 * time.Microsecond, 1.5},
+		{"one microsecond", time.Microsecond, 0.001},
+		{"below a microsecond", 900 * time.Nanosecond, 0},
+		{"whole milliseconds", 7 * time.Millisecond, 7},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &stubProvider{complete: okComplete}
+			e := executor.New(map[string]executor.Target{
+				"m": {Model: "m", Upstream: "up-1", Provider: p},
+			}, steppingClock(tc.step))
+			d := decision("m")
+			if _, err := e.Complete(context.Background(), d, provider.Request{}); err != nil {
+				t.Fatal(err)
+			}
+			if got := oneAttempt(t, d).DurationMS; got != tc.want {
+				t.Fatalf("DurationMS = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

@@ -79,10 +79,10 @@ type Candidate struct {
 
 // Attempt is one upstream call made on behalf of a decision.
 type Attempt struct {
-	Model      string `json:"model"`
-	Outcome    string `json:"outcome"`              // OutcomeOK, OutcomeError, OutcomeCanceled or OutcomePartial
-	ErrorKind  string `json:"error_kind,omitempty"` // a provider.ErrorKind value
-	DurationMS int64  `json:"duration_ms"`
+	Model      string  `json:"model"`
+	Outcome    string  `json:"outcome"`              // OutcomeOK, OutcomeError, OutcomeCanceled or OutcomePartial
+	ErrorKind  string  `json:"error_kind,omitempty"` // a provider.ErrorKind value
+	DurationMS float64 `json:"duration_ms"`          // milliseconds, microsecond resolution
 }
 
 // NewDecisionID returns "dec_" followed by 32 lowercase hex characters from

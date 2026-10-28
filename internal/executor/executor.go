@@ -114,7 +114,7 @@ func (e *Executor) record(d *router.Decision, model, outcome string, kind provid
 		Model:      model,
 		Outcome:    outcome,
 		ErrorKind:  string(kind),
-		DurationMS: e.now().Sub(start).Milliseconds(),
+		DurationMS: float64(e.now().Sub(start).Microseconds()) / 1000,
 	})
 }
 

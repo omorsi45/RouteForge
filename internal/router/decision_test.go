@@ -75,6 +75,22 @@ func TestDecisionJSONShape(t *testing.T) {
 	}
 }
 
+func TestAttemptDurationJSON(t *testing.T) {
+	raw, err := json.Marshal(router.Attempt{Model: "m", Outcome: router.OutcomeOK, DurationMS: 1.25})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		DurationMS float64 `json:"duration_ms"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.DurationMS != 1.25 {
+		t.Fatalf("duration_ms = %v in %s, want 1.25", got.DurationMS, raw)
+	}
+}
+
 func TestValidStrategy(t *testing.T) {
 	for _, s := range []string{"quality", "strongest", "cheapest", "static", "latency"} {
 		if !router.ValidStrategy(s) {
