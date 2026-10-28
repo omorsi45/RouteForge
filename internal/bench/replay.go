@@ -20,7 +20,7 @@ import (
 const ParityThreshold = 0.999
 
 // ReplayLatencyNote is the text of ReplayResults.LatencyNote.
-const ReplayLatencyNote = "The gateway's latency strategy adapts its estimates to observed attempts (spec 8.6); " +
+const ReplayLatencyNote = "The gateway's latency strategy adapts its estimates to observed attempts; " +
 	"the offline latency router uses the SIMULATED priors only, so its agreement is reported but not part of the parity check."
 
 // maxMismatches is how many disagreements a strategy's result lists.
