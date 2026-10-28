@@ -11,9 +11,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/omorsi45/routeforge/internal/auth"
+	"github.com/omorsi45/routeforge/internal/bench"
 )
 
 const testKey = "test-key-bench"
@@ -256,5 +259,384 @@ func TestReplayCLIExitsOneOnErrors(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "bench", "results", "bad", "replay.json")); err == nil {
 		t.Error("a failed run left a result file")
+	}
+}
+
+// cliStub is a gateway for the load and fault commands: it serves chat
+// requests, stored decisions and the accounting books.
+type cliStub struct {
+	*httptest.Server
+	next atomic.Int64
+	// books are the tenants' accounting, by tenant name.
+	books map[string]map[string]int64
+}
+
+func newCLIStub(t *testing.T) *cliStub {
+	t.Helper()
+	s := &cliStub{books: map[string]map[string]int64{
+		"bench":      {"spent_nanos": 7000, "usage_cost_nanos": 7000},
+		"bench-over": {"spent_nanos": 3500000, "usage_cost_nanos": 3500000, "overshoot_nanos": 500000},
+	}}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Stream bool `json:"stream"`
+		}
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &req)
+		w.Header().Set("X-RouteForge-Decision-Id", fmt.Sprintf("dec_%d", s.next.Add(1)))
+		w.Header().Set("X-RouteForge-Model", "m1")
+		if req.Stream {
+			_, _ = io.WriteString(w, "data: {\"id\":\"c\"}\n\ndata: [DONE]\n\n")
+			return
+		}
+		_, _ = io.WriteString(w, `{"routeforge":{"decision_id":"x"}}`)
+	})
+	mux.HandleFunc("GET /v1/routing/decisions/{id}", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprintf(w, `{"id":%q,"chosen":"m1","decided_in_us":120,"attempts":[{"model":"m1","outcome":"ok","duration_ms":0.5}]}`, r.PathValue("id"))
+	})
+	mux.HandleFunc("GET /admin/accounting", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer test-admin-key" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		tenant := r.URL.Query().Get("tenant")
+		out := map[string]any{"tenant": tenant, "day": r.URL.Query().Get("day")}
+		for k, v := range s.books[tenant] {
+			out[k] = v
+		}
+		_ = json.NewEncoder(w).Encode(out)
+	})
+	s.Server = httptest.NewServer(mux)
+	t.Cleanup(s.Close)
+	return s
+}
+
+// fakeGateway stands for a gateway process; stopped records the stops.
+type fakeGateway struct {
+	url     string
+	stopped *atomic.Int32
+}
+
+func (g fakeGateway) BaseURL() string { return g.url }
+func (g fakeGateway) PID() int        { return os.Getpid() }
+func (g fakeGateway) Stop() error     { g.stopped.Add(1); return nil }
+
+// benchRoot is a repository root with the config file bench/configs/<name>.
+func benchRoot(t *testing.T, name, configYAML string) string {
+	t.Helper()
+	root := t.TempDir()
+	path := filepath.Join(root, "bench", "configs", name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(configYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+func tenantConfig(extra string) string {
+	return fmt.Sprintf(`tenants:
+  - name: bench
+    api_key_sha256:
+      - %s
+%sproviders:
+  - name: fake-1
+    type: fake
+models:
+  - name: m1
+    provider: fake-1
+    input_per_mtok: 1
+    output_per_mtok: 2
+  - name: m-over
+    provider: fake-1
+    input_per_mtok: 1
+    output_per_mtok: 2
+`, auth.HashKey(testKey), extra)
+}
+
+func TestLoadCLIValidatesFlags(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "routeforge")
+	if err := os.WriteFile(bin, []byte("not a real gateway"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"no run id", []string{"load", "--gateway-bin", bin, "--config", "bench/configs/load-zero.yaml"}, "--run-id is required"},
+		{"bad run id", []string{"load", "--run-id", "a/b", "--gateway-bin", bin, "--config", "bench/configs/load-zero.yaml"}, "--run-id"},
+		{"no config", []string{"load", "--run-id", "r", "--gateway-bin", bin}, "--config is required"},
+		{"config is not a load config", []string{"load", "--run-id", "r", "--gateway-bin", bin, "--config", "bench/configs/replay.yaml"}, "load-"},
+		{"config is not yaml", []string{"load", "--run-id", "r", "--gateway-bin", bin, "--config", "bench/configs/load-zero.json"}, "load-"},
+		{"gateway binary missing", []string{"load", "--run-id", "r", "--gateway-bin", bin + ".none", "--config", "bench/configs/load-zero.yaml"}, "--gateway-bin"},
+		{"gateway binary is a directory", []string{"load", "--run-id", "r", "--gateway-bin", filepath.Dir(bin), "--config", "bench/configs/load-zero.yaml"}, "--gateway-bin"},
+		{"unknown flag", []string{"load", "--bogus"}, "bogus"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			code, _, errText := runCLI(t, c.args...)
+			if code != 2 {
+				t.Fatalf("exit %d, want 2; stderr %q", code, errText)
+			}
+			if !strings.Contains(errText, c.want) {
+				t.Errorf("stderr %q does not mention %q", errText, c.want)
+			}
+		})
+	}
+}
+
+// swapLoadSeams replaces how the load command starts gateways and which
+// scenarios it runs, and restores them when the test ends.
+func swapLoadSeams(t *testing.T, start func(ctx context.Context, o bench.ProcessOptions) (bench.Gateway, error), scenarios []bench.Scenario) {
+	t.Helper()
+	oldStart, oldScenarios := startGatewayProcess, loadScenarios
+	startGatewayProcess = start
+	loadScenarios = func() []bench.Scenario { return scenarios }
+	t.Cleanup(func() { startGatewayProcess, loadScenarios = oldStart, oldScenarios })
+}
+
+func TestLoadCLIWritesResult(t *testing.T) {
+	stub := newCLIStub(t)
+	root := benchRoot(t, "load-profiled.yaml", tenantConfig(""))
+	bin := filepath.Join(t.TempDir(), "routeforge")
+	if err := os.WriteFile(bin, nil, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var stopped atomic.Int32
+	var started []bench.ProcessOptions
+	swapLoadSeams(t, func(_ context.Context, o bench.ProcessOptions) (bench.Gateway, error) {
+		started = append(started, o)
+		return fakeGateway{url: stub.URL, stopped: &stopped}, nil
+	}, []bench.Scenario{
+		{Name: "open_loop_200rps", Mode: bench.ModeOpen, RPS: 200, Duration: 200 * time.Millisecond},
+		{Name: "closed_loop_c2", Mode: bench.ModeClosed, Concurrency: 2, Requests: 10},
+	})
+
+	code, out, errText := runCLI(t, "load", "--gateway-bin", bin, "--config", "bench/configs/load-profiled.yaml",
+		"--root", root, "--run-id", "smoke")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr %q", code, errText)
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 2 || !strings.HasPrefix(lines[0], "load OK: load-profiled, 2 scenarios, ") || !strings.HasPrefix(lines[1], "overhead target: p95 ") {
+		t.Errorf("stdout %q, want the summary line and the overhead target line", out)
+	}
+
+	if len(started) != 2 || stopped.Load() != 2 {
+		t.Fatalf("started %d gateways and stopped %d, want 2 and 2 (one per scenario)", len(started), stopped.Load())
+	}
+	absBin, _ := filepath.Abs(bin)
+	for i, o := range started {
+		wantLog := filepath.Join(root, "bench", "results", "smoke", "raw", "gateway-load-profiled-"+[]string{"open_loop_200rps", "closed_loop_c2"}[i]+".log")
+		if o.Binary != absBin || o.Addr != "127.0.0.1:18080" || o.LogPath != wantLog || !filepath.IsAbs(o.ConfigPath) ||
+			filepath.Base(o.ConfigPath) != "load-profiled.yaml" {
+			t.Errorf("gateway %d options = %+v, want binary %s, port 18080 and log %s", i, o, absBin, wantLog)
+		}
+	}
+
+	data, err := os.ReadFile(filepath.Join(root, "bench", "results", "smoke", "load-profiled.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Kind    string `json:"kind"`
+		Results struct {
+			Scenarios map[string]struct {
+				Requests  int `json:"requests"`
+				Completed int `json:"completed"`
+			} `json:"scenarios"`
+			OverheadTarget struct {
+				Scenario string  `json:"scenario"`
+				Below    float64 `json:"p95_ms_below"`
+			} `json:"overhead_target"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc.Kind != "load-profiled" || len(doc.Results.Scenarios) != 2 || doc.Results.Scenarios["closed_loop_c2"].Completed != 10 {
+		t.Errorf("result = %+v", doc)
+	}
+	if doc.Results.OverheadTarget.Scenario != "profiled open loop 200 rps" || doc.Results.OverheadTarget.Below != 20 {
+		t.Errorf("overhead target = %+v", doc.Results.OverheadTarget)
+	}
+	if strings.Contains(string(data), testKey) {
+		t.Error("the result file holds the API key")
+	}
+}
+
+func TestLoadCLIZeroLatencyHasNoTargetLine(t *testing.T) {
+	stub := newCLIStub(t)
+	root := benchRoot(t, "load-zero.yaml", tenantConfig(""))
+	bin := filepath.Join(t.TempDir(), "routeforge")
+	if err := os.WriteFile(bin, nil, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var stopped atomic.Int32
+	swapLoadSeams(t, func(context.Context, bench.ProcessOptions) (bench.Gateway, error) {
+		return fakeGateway{url: stub.URL, stopped: &stopped}, nil
+	}, []bench.Scenario{{Name: "closed_loop_c1", Mode: bench.ModeClosed, Concurrency: 1, Requests: 4}})
+
+	code, out, errText := runCLI(t, "load", "--gateway-bin", bin, "--config", "bench/configs/load-zero.yaml", "--root", root, "--run-id", "z")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr %q", code, errText)
+	}
+	if want := "load OK: load-zero, 1 scenarios, 4 requests\n"; out != want {
+		t.Errorf("stdout %q, want %q", out, want)
+	}
+	if _, err := os.Stat(filepath.Join(root, "bench", "results", "z", "load-zero.json")); err != nil {
+		t.Errorf("no load-zero.json: %v", err)
+	}
+}
+
+func TestLoadCLIExitsOneWhenAGatewayCannotStart(t *testing.T) {
+	root := benchRoot(t, "load-zero.yaml", tenantConfig(""))
+	bin := filepath.Join(t.TempDir(), "routeforge")
+	if err := os.WriteFile(bin, nil, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	swapLoadSeams(t, func(context.Context, bench.ProcessOptions) (bench.Gateway, error) {
+		return nil, fmt.Errorf("port taken")
+	}, []bench.Scenario{{Name: "closed_loop_c1", Mode: bench.ModeClosed, Concurrency: 1, Requests: 1}})
+
+	code, out, errText := runCLI(t, "load", "--gateway-bin", bin, "--config", "bench/configs/load-zero.yaml", "--root", root, "--run-id", "f")
+	if code != 1 || out != "" || !strings.Contains(errText, "port taken") || !strings.HasPrefix(errText, "load: ") {
+		t.Errorf("exit %d, stdout %q, stderr %q, want exit 1 and the reason on stderr", code, out, errText)
+	}
+	if _, err := os.Stat(filepath.Join(root, "bench", "results", "f", "load-zero.json")); err == nil {
+		t.Error("a failed run left a result file")
+	}
+}
+
+func TestFaultsCLIRejectsBadFlags(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"no run id", []string{"faults"}, "--run-id is required"},
+		{"bad run id", []string{"faults", "--run-id", ".."}, "--run-id"},
+		{"no admin key", []string{"faults", "--run-id", "r", "--admin-key", ""}, "--admin-key"},
+		{"no over key", []string{"faults", "--run-id", "r", "--over-key", ""}, "--over-key"},
+		{"unknown flag", []string{"faults", "--bogus"}, "bogus"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			code, _, errText := runCLI(t, c.args...)
+			if code != 2 {
+				t.Fatalf("exit %d, want 2; stderr %q", code, errText)
+			}
+			if !strings.Contains(errText, c.want) {
+				t.Errorf("stderr %q does not mention %q", errText, c.want)
+			}
+		})
+	}
+}
+
+// faultsTenants finishes the bench tenant of tenantConfig with a budget and adds
+// the over tenant: a small budget and one allowed model.
+func faultsTenants() string {
+	return fmt.Sprintf(`    daily_budget_usd: 100
+  - name: bench-over
+    api_key_sha256:
+      - %s
+    daily_budget_usd: 0.003
+    allowed_models: [m-over]
+`, auth.HashKey("test-key-bench-over"))
+}
+
+func TestFaultsCLIWritesResult(t *testing.T) {
+	stub := newCLIStub(t)
+	root := benchRoot(t, "faults.yaml", tenantConfig(faultsTenants()))
+
+	code, out, errText := runCLI(t, "faults", "--base-url", stub.URL, "--root", root, "--run-id", "smoke")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr %q", code, errText)
+	}
+	if want := "faults OK: 2200 requests, success rate 1.0000, invariants hold\n"; out != want {
+		t.Errorf("stdout %q, want %q", out, want)
+	}
+
+	data, err := os.ReadFile(filepath.Join(root, "bench", "results", "smoke", "faults.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Kind   string         `json:"kind"`
+		Params map[string]any `json:"params"`
+		Result struct {
+			Bench      struct{ Requests int } `json:"bench"`
+			BenchOver  struct{ Requests int } `json:"bench_over"`
+			Invariants struct {
+				Hold bool `json:"invariants_hold"`
+			} `json:"invariants"`
+			Accounting map[string]struct {
+				BudgetNanos int64 `json:"budget_nanos"`
+			} `json:"accounting"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc.Kind != "faults" || doc.Result.Bench.Requests != 2000 || doc.Result.BenchOver.Requests != 200 || !doc.Result.Invariants.Hold {
+		t.Errorf("result = %+v", doc)
+	}
+	if doc.Result.Accounting["bench"].BudgetNanos != 100_000_000_000 || doc.Result.Accounting["bench-over"].BudgetNanos != 3_000_000 {
+		t.Errorf("budgets = %+v, want the config's 100 USD and 0.003 USD in nano-USD", doc.Result.Accounting)
+	}
+	if doc.Params["over_model"] != "m-over" || doc.Params["concurrency"] != float64(32) || doc.Params["deadline_ms"] != float64(2000) {
+		t.Errorf("params = %v", doc.Params)
+	}
+	for _, secret := range []string{testKey, "test-key-bench-over", "test-admin-key"} {
+		if strings.Contains(string(data), secret) {
+			t.Errorf("the result file holds the key %q", secret)
+		}
+	}
+}
+
+func TestFaultsCLIExitsZeroWhenInvariantsAreViolated(t *testing.T) {
+	stub := newCLIStub(t)
+	stub.books["bench"]["reserved_nanos"] = 99
+	root := benchRoot(t, "faults.yaml", tenantConfig(faultsTenants()))
+
+	code, out, errText := runCLI(t, "faults", "--base-url", stub.URL, "--root", root, "--run-id", "bad")
+	if code != 0 {
+		t.Fatalf("exit %d, want 0 because the result records the violation; stderr %q", code, errText)
+	}
+	if want := "faults OK: 2200 requests, success rate 1.0000, invariants violated\n"; out != want {
+		t.Errorf("stdout %q, want %q", out, want)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "bench", "results", "bad", "faults.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"invariants_hold": false`) {
+		t.Errorf("the result does not record the violation:\n%s", data)
+	}
+}
+
+func TestFaultsCLIExitsOneOnErrors(t *testing.T) {
+	stub := newCLIStub(t)
+	url := stub.URL
+	root := benchRoot(t, "faults.yaml", tenantConfig(faultsTenants()))
+	noBudgets := benchRoot(t, "faults.yaml", tenantConfig("    rpm: 5\n"))
+
+	for _, c := range []struct {
+		name string
+		args []string
+	}{
+		{"config missing", []string{"--base-url", url, "--root", root, "--config", "bench/configs/none.yaml"}},
+		{"config has no budgets", []string{"--base-url", url, "--root", noBudgets}},
+		{"wrong admin key", []string{"--base-url", url, "--root", root, "--admin-key", "wrong"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			args := append([]string{"faults", "--run-id", "bad"}, c.args...)
+			code, out, errText := runCLI(t, args...)
+			if code != 1 || out != "" || !strings.HasPrefix(errText, "faults: ") {
+				t.Errorf("exit %d, stdout %q, stderr %q, want exit 1 and the reason on stderr", code, out, errText)
+			}
+		})
 	}
 }

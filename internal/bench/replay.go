@@ -235,6 +235,7 @@ func RunReplay(ctx context.Context, o ReplayOptions) (ReplayResults, error) {
 	if o.Workers < 1 {
 		return ReplayResults{}, fmt.Errorf("workers must be at least 1, got %d", o.Workers)
 	}
+	defer o.Client.Close() // the gateway is stopped next, and waits for idle connections to go
 	data, err := loadReplayData(filepath.Join(o.Root, "trainer", "artifacts", "replay"))
 	if err != nil {
 		return ReplayResults{}, err

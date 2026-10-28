@@ -1,0 +1,84 @@
+# Load benchmark gateway, zero upstream latency. Six simulated providers, one per
+# pool model, answer at once, so the time a request takes is the gateway's:
+# routing, accounting and the HTTP surface, and not an upstream. Run through
+# scripts/bench.sh load, which starts it once per scenario.
+#
+# The benchmark measures gateway overhead, not configured admission limits, so
+# every model accepts far more requests than a scenario sends, and the
+# in-flight limit is raised to match. Relative paths resolve against the
+# directory of this file.
+server:
+  max_inflight: 8192
+
+tenants:
+  - name: bench
+    # test-key-bench is a public benchmark key for loopback runs only. Never
+    # expose a gateway that accepts it.
+    api_key_sha256:
+      - 7c0c7e4891f7e2af5ed802eda1f4c03bbeaeddaf2cc920c8b74275b1e30268aa
+    allow_strategy_override: true
+
+policy:
+  path: ../../trainer/artifacts/policy.json
+
+pricing:
+  file: ../../deploy/prices.yaml
+
+providers:
+  - name: fake-1
+    type: fake
+    fake: {seed: 1, ttft: 0s, per_token: 0s, output_tokens: 64}
+  - name: fake-2
+    type: fake
+    fake: {seed: 2, ttft: 0s, per_token: 0s, output_tokens: 64}
+  - name: fake-3
+    type: fake
+    fake: {seed: 3, ttft: 0s, per_token: 0s, output_tokens: 64}
+  - name: fake-4
+    type: fake
+    fake: {seed: 4, ttft: 0s, per_token: 0s, output_tokens: 64}
+  - name: fake-5
+    type: fake
+    fake: {seed: 5, ttft: 0s, per_token: 0s, output_tokens: 64}
+  - name: fake-6
+    type: fake
+    fake: {seed: 6, ttft: 0s, per_token: 0s, output_tokens: 64}
+
+models:
+  - name: gpt-5
+    provider: fake-1
+    latency_prior: {ttft_ms: 600, decode_tokens_per_s: 60, jitter: 0.1}
+    max_concurrency: 2048
+    queue_size: 2048
+    queue_timeout: 10s
+  - name: claude-sonnet-4
+    provider: fake-2
+    latency_prior: {ttft_ms: 700, decode_tokens_per_s: 45, jitter: 0.1}
+    max_concurrency: 2048
+    queue_size: 2048
+    queue_timeout: 10s
+  - name: gemini-2.5-pro
+    provider: fake-3
+    strongest: true
+    latency_prior: {ttft_ms: 500, decode_tokens_per_s: 75, jitter: 0.1}
+    max_concurrency: 2048
+    queue_size: 2048
+    queue_timeout: 10s
+  - name: gemini-2.5-flash
+    provider: fake-4
+    latency_prior: {ttft_ms: 400, decode_tokens_per_s: 90, jitter: 0.1}
+    max_concurrency: 2048
+    queue_size: 2048
+    queue_timeout: 10s
+  - name: deepseek-v3.1-terminus
+    provider: fake-5
+    latency_prior: {ttft_ms: 300, decode_tokens_per_s: 105, jitter: 0.1}
+    max_concurrency: 2048
+    queue_size: 2048
+    queue_timeout: 10s
+  - name: qwen3-235b-a22b-2507
+    provider: fake-6
+    latency_prior: {ttft_ms: 200, decode_tokens_per_s: 120, jitter: 0.1}
+    max_concurrency: 2048
+    queue_size: 2048
+    queue_timeout: 10s
