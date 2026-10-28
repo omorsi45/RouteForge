@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -264,4 +266,205 @@ func jsonString(t *testing.T, s string) string {
 		t.Fatal(err)
 	}
 	return string(data)
+}
+
+// The tests below guard the documents. The hand-written ones state no measured
+// result, so what a program can check is checked: no em dash in any document,
+// and no claim of a guarantee other than the marginal one that the evaluation
+// report states.
+
+func TestDocsHaveNoEmDash(t *testing.T) {
+	for _, p := range emDashProblems(committedDocs(t)) {
+		t.Error(p)
+	}
+}
+
+func TestDocsMentionOnlyTheMarginalGuarantee(t *testing.T) {
+	for _, p := range guaranteeProblems(committedDocs(t), guaranteeNote(t)) {
+		t.Error(p)
+	}
+}
+
+// requiredDocs are the documents the repository carries. The guards fail when
+// one is missing instead of skipping it.
+var requiredDocs = []string{
+	"README.md",
+	"CONTRIBUTING.md",
+	"trainer/README.md",
+	"docs/architecture.md",
+	"docs/routing.md",
+	"docs/operations.md",
+	"docs/benchmarks.md",
+	"docs/adr/0001-offline-trained-certified-router.md",
+	"docs/adr/0002-json-policy-artifact-with-parity.md",
+	"docs/adr/0003-nano-usd-integer-accounting.md",
+	"docs/adr/0004-tenants-in-yaml.md",
+	"docs/adr/0005-replay-and-fake-providers-for-evidence.md",
+	"examples/demo-output.md",
+}
+
+// guaranteeDocs are the documents that must carry the guarantee sentence.
+var guaranteeDocs = []string{"README.md", "docs/routing.md"}
+
+// forbiddenGuaranteePhrases claim more than the marginal guarantee. They are
+// compared in lower case.
+var forbiddenGuaranteePhrases = []string{"per-request guarantee", "guaranteed quality"}
+
+// guaranteeStart begins the guarantee sentence in the notes of the evaluation
+// report.
+const guaranteeStart = "With probability at least 1 - delta"
+
+// committedDocs reads every document the guards scan, keyed by its path from
+// the repository root: the required ones, every Markdown file under docs, and
+// the Markdown files directly in examples.
+func committedDocs(t *testing.T) map[string]string {
+	t.Helper()
+	paths := slices.Clone(requiredDocs)
+	err := filepath.WalkDir(filepath.Join(committedRoot, "docs"), func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() && filepath.Ext(path) == ".md" {
+			rel, err := filepath.Rel(committedRoot, path)
+			if err != nil {
+				return err
+			}
+			paths = append(paths, filepath.ToSlash(rel))
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	examples, err := filepath.Glob(filepath.Join(committedRoot, "examples", "*.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range examples {
+		rel, err := filepath.Rel(committedRoot, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		paths = append(paths, filepath.ToSlash(rel))
+	}
+
+	docs := make(map[string]string, len(paths))
+	for _, rel := range paths {
+		data, err := os.ReadFile(filepath.Join(committedRoot, filepath.FromSlash(rel)))
+		if err != nil {
+			t.Fatalf("document %s cannot be read: %v", rel, err)
+		}
+		docs[rel] = string(data)
+	}
+	return docs
+}
+
+// guaranteeNote is the guarantee sentence as the evaluation report states it.
+// It is found by its first words, not by position, and must be there once.
+func guaranteeNote(t *testing.T) string {
+	t.Helper()
+	var report struct {
+		Notes []string `json:"notes"`
+	}
+	if err := json.Unmarshal(readCommitted(t, reportsPath+"/evaluation.json"), &report); err != nil {
+		t.Fatal(err)
+	}
+	var found []string
+	for _, note := range report.Notes {
+		if strings.HasPrefix(note, guaranteeStart) {
+			found = append(found, note)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("evaluation.json has %d notes that start with %q, want exactly one", len(found), guaranteeStart)
+	}
+	return found[0]
+}
+
+// emDashProblems lists the lines of the documents that hold an em dash.
+func emDashProblems(docs map[string]string) []string {
+	var problems []string
+	for _, name := range orderedKeys(docs, nil) {
+		for i, line := range strings.Split(docs[name], "\n") {
+			if strings.Contains(line, emDash) {
+				problems = append(problems, fmt.Sprintf("%s:%d has an em dash", name, i+1))
+			}
+		}
+	}
+	return problems
+}
+
+// guaranteeProblems lists what is wrong with the way the documents speak of the
+// guarantee: a guarantee document that lacks the exact sentence note, and any
+// document that holds a phrase claiming more than the marginal guarantee.
+func guaranteeProblems(docs map[string]string, note string) []string {
+	var problems []string
+	for _, name := range guaranteeDocs {
+		if !strings.Contains(docs[name], note) {
+			problems = append(problems, name+" does not contain the guarantee sentence of the evaluation report")
+		}
+	}
+	for _, name := range orderedKeys(docs, nil) {
+		lower := strings.ToLower(docs[name])
+		for _, phrase := range forbiddenGuaranteePhrases {
+			if strings.Contains(lower, phrase) {
+				problems = append(problems, fmt.Sprintf("%s contains %q", name, phrase))
+			}
+		}
+	}
+	return problems
+}
+
+// The guards would be worth nothing if they passed on any input, so these tests
+// run them on small synthetic documents, not on the committed ones.
+
+func TestGuardFlagsEmDash(t *testing.T) {
+	docs := map[string]string{
+		"clean.md": "A hyphen - is fine.\nSo is a comma, a colon: and a period.\n",
+		"dirty.md": "first line\nsecond \u2014 line\nthird \u2014 line\n",
+	}
+	want := []string{
+		"dirty.md:2 has an em dash",
+		"dirty.md:3 has an em dash",
+	}
+	if got := emDashProblems(docs); strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("problems = %q, want %q", got, want)
+	}
+}
+
+func TestGuardFlagsGuaranteeClaims(t *testing.T) {
+	const note = "The marginal guarantee sentence."
+	t.Run("sentence in both documents and no claim", func(t *testing.T) {
+		docs := map[string]string{
+			"README.md":       "Intro. " + note + " More.\n",
+			"docs/routing.md": note + "\n",
+			"docs/other.md":   "Nothing to see.\n",
+		}
+		if got := guaranteeProblems(docs, note); len(got) != 0 {
+			t.Fatalf("problems = %q, want none", got)
+		}
+	})
+	t.Run("missing sentence and forbidden phrases", func(t *testing.T) {
+		docs := map[string]string{
+			"README.md":       note + "\n",
+			"docs/routing.md": "The sentence is missing here.\n",
+			"docs/more.md":    "It offers GUARANTEED QUALITY.\n",
+			"docs/other.md":   "This is a Per-Request Guarantee.\n",
+		}
+		want := []string{
+			"docs/routing.md does not contain the guarantee sentence of the evaluation report",
+			`docs/more.md contains "guaranteed quality"`,
+			`docs/other.md contains "per-request guarantee"`,
+		}
+		if got := guaranteeProblems(docs, note); strings.Join(got, "\n") != strings.Join(want, "\n") {
+			t.Fatalf("problems = %q, want %q", got, want)
+		}
+	})
+	t.Run("absent required document", func(t *testing.T) {
+		docs := map[string]string{"docs/routing.md": note + "\n"}
+		want := []string{"README.md does not contain the guarantee sentence of the evaluation report"}
+		if got := guaranteeProblems(docs, note); strings.Join(got, "\n") != strings.Join(want, "\n") {
+			t.Fatalf("problems = %q, want %q", got, want)
+		}
+	})
 }
