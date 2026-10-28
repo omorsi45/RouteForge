@@ -321,6 +321,17 @@ def test_make_train_target_runs_the_train_command():
     assert "\ntrain:\n\t$(TRAIN) train\n" in makefile
 
 
+def test_makefile_pins_blas_threads():
+    makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+    lines = makefile.splitlines()
+    train_line = next(line for line in lines if line.startswith("TRAIN :="))
+    py_test_recipe = lines[lines.index("py-test:") + 1]
+    for name, line in (("TRAIN", train_line), ("py-test", py_test_recipe)):
+        words = line.split()
+        for pin in ("OMP_NUM_THREADS=1", "OPENBLAS_NUM_THREADS=1", "MKL_NUM_THREADS=1"):
+            assert pin in words, f"{name} does not set {pin}"
+
+
 def test_cli_train_prints_summary(tmp_path, capsys):
     paths = build_synthetic_project(tmp_path, n_per_dataset=SMALL)
     assert main(["--root", str(paths.root), "train"]) == 0

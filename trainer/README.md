@@ -17,7 +17,8 @@ make py-check py-test   # ruff and pytest; hermetic, no network, no model
 ## Commands
 
 Run these from the repository root. None of them runs in CI. `data`, `train` and `evaluate` build
-on each other, so run them in that order.
+on each other, so run them in that order. Trainer commands pin BLAS and OpenMP to one thread, which
+keeps runs deterministic and avoids thread oversubscription on many-core hosts.
 
 - `make data`: downloads the pinned LLMRouterBench archive, verifies its checksum, extracts the
   pool members, then builds outcomes, stratified splits, replay files and `data/manifest.json`.

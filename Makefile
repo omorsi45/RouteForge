@@ -4,7 +4,7 @@ EXAMPLE_CONFIGS := $(wildcard deploy/configs/*.yaml)
 PYTHON ?= python3
 VENV := trainer/.venv
 VPY := $(VENV)/bin/python
-TRAIN := PYTHONPATH=trainer $(VPY) -m routeforge_train --root .
+TRAIN := OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONPATH=trainer $(VPY) -m routeforge_train --root .
 EXTRACTION_MODELS ?=
 
 .PHONY: check fmt-check vet build tidy-check validate-configs test test-race vuln py-setup py-check py-test data train evaluate label-extraction
@@ -44,7 +44,7 @@ py-check:
 	cd trainer && .venv/bin/ruff check . && .venv/bin/ruff format --check .
 
 py-test:
-	cd trainer && .venv/bin/python -m pytest
+	cd trainer && OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python -m pytest
 
 data:
 	$(TRAIN) data
