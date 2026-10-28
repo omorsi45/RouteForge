@@ -12,6 +12,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
+
 	"github.com/omorsi45/routeforge/internal/accounting"
 	"github.com/omorsi45/routeforge/internal/auth"
 	"github.com/omorsi45/routeforge/internal/config"
@@ -49,6 +54,7 @@ type Options struct {
 	Policies    *policy.Registry       // the registry the router reads; may be nil, and then the policy admin routes do not exist
 	InFlight    *reliability.InFlight  // limits concurrent chat and explain requests; nil means no limit
 	Metrics     *telemetry.Metrics     // counts requests and serves GET /metrics; nil means no metrics and no /metrics route
+	Tracer      trace.Tracer           // starts the http.request span of every request; nil means no spans
 	Logger      *slog.Logger           // nil: slog.New(slog.DiscardHandler)
 	Now         func() time.Time       // nil: time.Now
 	ReadyChecks []ReadyCheck
@@ -66,6 +72,7 @@ type Server struct {
 	policies  *policy.Registry
 	inflight  *reliability.InFlight
 	metrics   *telemetry.Metrics
+	tracer    trace.Tracer
 	logger    *slog.Logger
 	now       func() time.Time
 	checks    []ReadyCheck
@@ -85,6 +92,7 @@ func New(o Options) *Server {
 		policies:  o.Policies,
 		inflight:  o.InFlight,
 		metrics:   o.Metrics,
+		tracer:    o.Tracer,
 		logger:    o.Logger,
 		now:       o.Now,
 		checks:    o.ReadyChecks,
@@ -94,6 +102,9 @@ func New(o Options) *Server {
 	}
 	if s.decisions == nil {
 		s.decisions = store.NewRing(defaultDecisionCapacity)
+	}
+	if s.tracer == nil {
+		s.tracer = noop.NewTracerProvider().Tracer("")
 	}
 	if s.logger == nil {
 		s.logger = slog.New(slog.DiscardHandler)
@@ -123,7 +134,7 @@ func (s *Server) Handler() http.Handler {
 		// No authentication: restrict the endpoint at the proxy.
 		mux.Handle("GET /metrics", s.metrics.Handler())
 	}
-	return s.withRequestID(s.withAccessLog(mux))
+	return s.withRequestID(s.withTracing(s.withAccessLog(mux)))
 }
 
 // SetDraining makes /readyz return 503 from now on.
@@ -162,6 +173,9 @@ type reqInfo struct {
 	// ended with [DONE] or a terminal error event. A request whose context was
 	// canceled in that state left its client with an incomplete response.
 	streamOpen bool
+	// status is the status the access log recorded for the request, 499 for a
+	// client that left. It is set once the handler has returned.
+	status int
 }
 
 type reqInfoKey struct{}
@@ -238,6 +252,32 @@ func clientGone(ctx context.Context, written int, info *reqInfo) bool {
 	return written == 0 || info.streamOpen
 }
 
+// withTracing runs each request in an http.request span, which is the parent of
+// the route.decide and provider.attempt spans of the request. It wraps the
+// access log, so the status it records is the one the access log settled on,
+// including 499 for a client that left. A server error (5xx) sets the span's
+// status to Error; a client error does not, and nor does a client that left.
+func (s *Server) withTracing(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		info := infoFrom(r.Context())
+		ctx, span := s.tracer.Start(r.Context(), "http.request",
+			trace.WithSpanKind(trace.SpanKindServer),
+			trace.WithAttributes(
+				attribute.String("http.request.method", r.Method),
+				attribute.String("url.path", r.URL.Path),
+				attribute.String("routeforge.request_id", info.requestID),
+			))
+		defer span.End()
+
+		next.ServeHTTP(w, r.WithContext(ctx))
+
+		span.SetAttributes(attribute.Int("http.response.status_code", info.status))
+		if info.status >= http.StatusInternalServerError {
+			span.SetStatus(codes.Error, http.StatusText(info.status))
+		}
+	})
+}
+
 // withAccessLog logs one line per request. It never logs bodies.
 func (s *Server) withAccessLog(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -254,6 +294,7 @@ func (s *Server) withAccessLog(next http.Handler) http.Handler {
 		if gone {
 			status = statusClientGone
 		}
+		info.status = status
 		if info.chat {
 			s.metrics.Request(info.model, info.strategy, info.profile, info.policyVersion, status)
 		}

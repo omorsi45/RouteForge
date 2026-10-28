@@ -162,8 +162,10 @@ func (m *Metrics) Handler() http.Handler {
 	return promhttp.HandlerFor(m.reg, promhttp.HandlerOpts{})
 }
 
-// policyLabel is the policy_version label for version.
-func policyLabel(version string) string {
+// PolicyLabel is how a policy version is written in a metric label and a span
+// attribute: the version itself, or "none" when the request was served with no
+// policy. It matches the X-RouteForge-Policy-Version header.
+func PolicyLabel(version string) string {
 	if version == "" {
 		return noPolicy
 	}
@@ -178,7 +180,7 @@ func (m *Metrics) Request(model, strategy, profile, policyVersion string, status
 	if m == nil {
 		return
 	}
-	m.requests.WithLabelValues(model, strategy, profile, policyLabel(policyVersion), strconv.Itoa(status)).Inc()
+	m.requests.WithLabelValues(model, strategy, profile, PolicyLabel(policyVersion), strconv.Itoa(status)).Inc()
 }
 
 // Decision counts one routing decision that chose a model.
@@ -186,7 +188,7 @@ func (m *Metrics) Decision(model, reason, strategy, policyVersion string) {
 	if m == nil {
 		return
 	}
-	m.decisions.WithLabelValues(model, reason, strategy, policyLabel(policyVersion)).Inc()
+	m.decisions.WithLabelValues(model, reason, strategy, PolicyLabel(policyVersion)).Inc()
 }
 
 // DecisionTime records how long a routing decision took.

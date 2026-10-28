@@ -10,6 +10,11 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
+
 	"github.com/omorsi45/routeforge/internal/accounting"
 	"github.com/omorsi45/routeforge/internal/config"
 	"github.com/omorsi45/routeforge/internal/policy"
@@ -40,13 +45,14 @@ type Signals struct {
 
 // EngineOptions configures an Engine. Nil NewID and Now use NewDecisionID and
 // time.Now. Nil Policies behaves like a registry with no active policy. Nil
-// Metrics records nothing.
+// Metrics records nothing and a nil Tracer starts no spans.
 type EngineOptions struct {
 	Models   []config.Model
 	Prices   map[string]accounting.Price // by configured model name
 	Policies *policy.Registry
 	Signals  Signals
 	Metrics  *telemetry.Metrics
+	Tracer   trace.Tracer
 	NewID    func() string
 	Now      func() time.Time
 }
@@ -63,6 +69,7 @@ type Engine struct {
 	policies *policy.Registry
 	signals  Signals
 	metrics  *telemetry.Metrics
+	tracer   trace.Tracer
 	newID    func() string
 	now      func() time.Time
 }
@@ -75,8 +82,12 @@ func NewEngine(o EngineOptions) *Engine {
 		policies: o.Policies,
 		signals:  o.Signals,
 		metrics:  o.Metrics,
+		tracer:   o.Tracer,
 		newID:    o.NewID,
 		now:      o.Now,
+	}
+	if e.tracer == nil {
+		e.tracer = noop.NewTracerProvider().Tracer("")
 	}
 	if e.newID == nil {
 		e.newID = NewDecisionID
@@ -231,8 +242,12 @@ func (e *Engine) activePolicy() *policy.Policy {
 }
 
 // Decide implements Router. It reads the active policy once, so a request
-// scores and routes against a single policy version.
+// scores and routes against a single policy version. The decision runs in a
+// route.decide span, a child of the span in ctx.
 func (e *Engine) Decide(ctx context.Context, req *Request) (*Decision, error) {
+	ctx, span := e.tracer.Start(ctx, "route.decide")
+	defer span.End()
+
 	start := time.Now()
 	d := &Decision{
 		ID:         e.newID(),
@@ -251,12 +266,61 @@ func (e *Engine) Decide(ctx context.Context, req *Request) (*Decision, error) {
 	}
 	// Only these two errors come with a decision (Ruling C8).
 	if err != nil && !errors.Is(err, ErrNoEligibleModel) && !errors.Is(err, ErrOverloaded) {
+		annotateDecideSpan(span, req, nil, err)
 		return nil, err
 	}
 	took := time.Since(start)
 	d.DecidedInUS = took.Microseconds()
 	e.recordDecision(d, took)
+	annotateDecideSpan(span, req, d, err)
 	return d, err
+}
+
+// annotateDecideSpan describes a finished decision on its span: the routing
+// that was chosen, or, for a request that got no decision, what the request
+// asked for, and the kind of the error. Nothing here comes from the prompt.
+func annotateDecideSpan(span trace.Span, req *Request, d *Decision, err error) {
+	var attrs []attribute.KeyValue
+	add := func(key, value string) {
+		if value != "" {
+			attrs = append(attrs, attribute.String(key, value))
+		}
+	}
+	if d == nil {
+		add("routeforge.strategy", req.Strategy)
+		add("routeforge.profile", req.Profile)
+	} else {
+		add("routeforge.strategy", d.Strategy)
+		add("routeforge.profile", d.Profile)
+		add("routeforge.policy_version", telemetry.PolicyLabel(d.PolicyVersion))
+		add("routeforge.decision_id", d.ID)
+		add("routeforge.model", d.Chosen)
+		add("routeforge.reason", d.Reason)
+	}
+	span.SetAttributes(attrs...)
+	if err != nil {
+		span.SetStatus(codes.Error, errorKind(err))
+	}
+}
+
+// errorKind names a Decide error for a span. It is a fixed word, never the
+// error text, which can name models and reasons.
+func errorKind(err error) string {
+	switch {
+	case errors.Is(err, ErrUnknownModel):
+		return "unknown_model"
+	case errors.Is(err, ErrModelNotAllowed):
+		return "model_not_allowed"
+	case errors.Is(err, ErrStrategyUnavailable):
+		return "strategy_unavailable"
+	case errors.Is(err, ErrNoEligibleModel):
+		return "no_eligible_model"
+	case errors.Is(err, ErrOverloaded):
+		return "overloaded"
+	case errors.Is(err, accounting.ErrAccountingUnavailable):
+		return "accounting_unavailable"
+	}
+	return "internal"
 }
 
 // recordDecision reports a finished decision: how long it took, and, when a

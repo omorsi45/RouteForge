@@ -24,6 +24,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
+
 	"github.com/omorsi45/routeforge/internal/accounting"
 	"github.com/omorsi45/routeforge/internal/health"
 	"github.com/omorsi45/routeforge/internal/provider"
@@ -90,6 +95,9 @@ type Options struct {
 	// Metrics receives the attempt durations, first-event times, retries and
 	// failovers; nil records none.
 	Metrics *telemetry.Metrics
+	// Tracer starts a provider.attempt span for every upstream call; nil starts
+	// none.
+	Tracer trace.Tracer
 }
 
 // Executor calls providers on behalf of routing decisions. It is safe for
@@ -105,6 +113,7 @@ type Executor struct {
 	maxAttempts int
 	sleep       func(context.Context, time.Duration) error
 	metrics     *telemetry.Metrics
+	tracer      trace.Tracer
 }
 
 // New returns an Executor over targets keyed by configured model name that
@@ -127,6 +136,10 @@ func NewWithOptions(o Options) *Executor {
 		maxAttempts: max(o.MaxAttempts, 1),
 		sleep:       o.Sleep,
 		metrics:     o.Metrics,
+		tracer:      o.Tracer,
+	}
+	if e.tracer == nil {
+		e.tracer = noop.NewTracerProvider().Tracer("")
 	}
 	if e.now == nil {
 		e.now = time.Now
@@ -159,7 +172,7 @@ func (e *Executor) Complete(ctx context.Context, d *router.Decision, req provide
 	var res *Result
 	err := e.run(ctx, d, m, func(a *attempt) error {
 		req.Model = a.target.Upstream
-		resp, err := a.target.Provider.Complete(ctx, req)
+		resp, err := a.target.Provider.Complete(a.ctx, req)
 		if err != nil {
 			return err
 		}
@@ -182,7 +195,7 @@ func (e *Executor) Stream(ctx context.Context, d *router.Decision, req provider.
 	var s *Stream
 	err := e.run(ctx, d, m, func(a *attempt) error {
 		req.Model = a.target.Upstream
-		inner, err := a.target.Provider.Stream(ctx, req)
+		inner, err := a.target.Provider.Stream(a.ctx, req)
 		if err != nil {
 			return err
 		}
@@ -239,7 +252,7 @@ func (e *Executor) run(ctx context.Context, d *router.Decision, m Meter, try fun
 		if calls > 0 && !e.mayRetry(ctx, calls, prev) {
 			return prev
 		}
-		a, err := e.admit(ctx, d, m, targets, &pos, prev)
+		a, err := e.admit(ctx, d, m, targets, &pos, prev, calls+1)
 		if err != nil {
 			return err
 		}
@@ -314,11 +327,12 @@ func (e *Executor) mayRetry(ctx context.Context, retry int, prev error) bool {
 
 // admit finds the first target from *pos on that accepts the request: its
 // breaker allows it, a queue slot is free in time and the meter agrees. Targets
-// that refuse are skipped, which is not an attempt. When none accepts it
-// returns prev, the last upstream error, or ErrNoTargetAccepted if no call was
-// made. prev is also what a meter refusal returns after a first attempt; a
-// context that ends in the queue returns its own error.
-func (e *Executor) admit(ctx context.Context, d *router.Decision, m Meter, targets []Target, pos *int, prev error) (*attempt, error) {
+// that refuse are skipped, which is not an attempt. The attempt it returns is
+// number n of the request and has its provider.attempt span open. When none
+// accepts it returns prev, the last upstream error, or ErrNoTargetAccepted if no
+// call was made. prev is also what a meter refusal returns after a first
+// attempt; a context that ends in the queue returns its own error.
+func (e *Executor) admit(ctx context.Context, d *router.Decision, m Meter, targets []Target, pos *int, prev error, n int) (*attempt, error) {
 	for ; *pos < len(targets); *pos++ {
 		t := targets[*pos]
 
@@ -356,7 +370,15 @@ func (e *Executor) admit(ctx context.Context, d *router.Decision, m Meter, targe
 			}
 			charge = c
 		}
-		return &attempt{e: e, d: d, target: t, ticket: ticket, release: release, charge: charge, start: e.now()}, nil
+		// The span covers the call, from the moment the model has accepted it to
+		// the end of the attempt, and is the parent of whatever the provider does.
+		actx, span := e.tracer.Start(ctx, "provider.attempt", trace.WithAttributes(
+			attribute.String("routeforge.model", t.Model),
+			attribute.Int("routeforge.attempt", n),
+			attribute.String("routeforge.decision_id", d.ID),
+			attribute.String("routeforge.policy_version", telemetry.PolicyLabel(d.PolicyVersion)),
+		))
+		return &attempt{e: e, d: d, target: t, ctx: actx, span: span, ticket: ticket, release: release, charge: charge, start: e.now()}, nil
 	}
 	if prev != nil {
 		return nil, prev
@@ -399,6 +421,8 @@ type attempt struct {
 	d      *router.Decision
 	target Target
 	start  time.Time
+	ctx    context.Context // carries the attempt's span; the provider is called with it
+	span   trace.Span
 
 	ticket  reliability.Ticket
 	release func()
@@ -456,6 +480,7 @@ func (a *attempt) end(r ending) {
 		if r.err != nil && r.outcome != router.OutcomeCanceled {
 			kind = provider.KindOf(r.err)
 		}
+		a.endSpan(r.outcome, kind)
 		a.e.record(a.d, a.target.Model, r.outcome, kind, dur)
 
 		switch {
@@ -480,6 +505,18 @@ func (a *attempt) end(r ending) {
 			a.charge.End(Settlement{Outcome: r.outcome, Usage: r.usage, DeliveredBytes: r.delivered})
 		}
 	})
+}
+
+// endSpan closes the attempt's span with how the attempt ended. A failure sets
+// the span's status to Error with the error kind and nothing else: the
+// provider's own message can echo the request.
+func (a *attempt) endSpan(outcome string, kind provider.ErrorKind) {
+	a.span.SetAttributes(attribute.String("routeforge.outcome", outcome))
+	if kind != "" {
+		a.span.SetAttributes(attribute.String("routeforge.error_kind", string(kind)))
+		a.span.SetStatus(codes.Error, string(kind))
+	}
+	a.span.End()
 }
 
 // Stream is a primed provider stream. Recv must be called from one goroutine

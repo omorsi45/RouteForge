@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"time"
 
 	"github.com/omorsi45/routeforge/internal/accounting"
 	"github.com/omorsi45/routeforge/internal/api"
@@ -21,6 +22,13 @@ import (
 	"github.com/omorsi45/routeforge/internal/telemetry"
 )
 
+// serviceName is the service name the traces carry.
+const serviceName = "routeforge"
+
+// tracingFlushTimeout bounds how long shutting down waits for the last spans to
+// reach the collector.
+const tracingFlushTimeout = 5 * time.Second
+
 // decisionRingSize is how many routing decisions the gateway keeps for
 // GET /v1/routing/decisions/{id}.
 const decisionRingSize = 10000
@@ -31,19 +39,23 @@ const usageRecordsKept = 100000
 
 // gateway is a built gateway: its HTTP surface, and the accounting behind it,
 // which the invariant tests read to check the books, and the metrics it
-// reports to, which GET /metrics serves.
+// reports to, which GET /metrics serves. shutdownTracing flushes the spans not
+// yet exported and stops the tracer provider; serve calls it after the drain.
 type gateway struct {
 	*api.Server
-	accountant *accounting.Accountant
-	usage      *accounting.MemoryUsage
-	metrics    *telemetry.Metrics
+	accountant      *accounting.Accountant
+	usage           *accounting.MemoryUsage
+	metrics         *telemetry.Metrics
+	shutdownTracing func(context.Context) error
 }
 
 // buildGateway constructs the HTTP surface over cfg: providers, prices, the
 // policy registry, the latency estimators, the model queues, the circuit
 // breakers, the accountant, the routing engine and the executor that retries
 // and fails over. Without a policy the engine routes like the basic router.
-// Every component reports to one set of metrics.
+// Every component reports to one set of metrics and one tracer. With
+// OTEL_EXPORTER_OTLP_ENDPOINT set (read through getenv) the tracer exports spans
+// to that collector; without it, tracing costs nothing.
 func buildGateway(cfg *config.Config, getenv func(string) string, logger *slog.Logger) (*gateway, error) {
 	// No client Timeout: streams outlive any fixed value, so deadlines come
 	// from request contexts.
@@ -60,6 +72,11 @@ func buildGateway(cfg *config.Config, getenv func(string) string, logger *slog.L
 	if err != nil {
 		return nil, err
 	}
+	tp, shutdownTracing, err := telemetry.NewTracerProvider(context.Background(), serviceName, getenv)
+	if err != nil {
+		return nil, err
+	}
+	tracer := tp.Tracer(serviceName)
 	metrics := telemetry.NewMetrics()
 	watchPolicy(reg, metrics)
 	latency := buildHealth(cfg)
@@ -84,19 +101,32 @@ func buildGateway(cfg *config.Config, getenv func(string) string, logger *slog.L
 				BudgetRemainingNanos: acct.RemainingNanos,
 			},
 			Metrics: metrics,
+			Tracer:  tracer,
 		}),
-		Executor:   buildExecutor(cfg, providers, breakers, queues, latency, metrics),
+		Executor:   buildExecutor(cfg, providers, breakers, queues, latency, metrics, tracer),
 		Accountant: acct,
 		Decisions:  store.NewRing(decisionRingSize),
 		Policies:   reg,
 		InFlight:   inflight,
 		Metrics:    metrics,
+		Tracer:     tracer,
 		Logger:     logger,
 	}
 	if cfg.Policy.Path != "" {
 		opts.ReadyChecks = []api.ReadyCheck{policyReadyCheck(reg)}
 	}
-	return &gateway{Server: api.New(opts), accountant: acct, usage: usage, metrics: metrics}, nil
+	return &gateway{Server: api.New(opts), accountant: acct, usage: usage, metrics: metrics, shutdownTracing: shutdownTracing}, nil
+}
+
+// closeTracing exports the spans still waiting and stops the tracer provider,
+// within tracingFlushTimeout. A failure is logged: the gateway is going away
+// either way.
+func (g *gateway) closeTracing(ctx context.Context, logger *slog.Logger) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), tracingFlushTimeout)
+	defer cancel()
+	if err := g.shutdownTracing(ctx); err != nil {
+		logger.Warn("flush traces failed", "error", err)
+	}
 }
 
 // serve runs the gateway on ln until ctx ends, then drains: /readyz turns
@@ -108,6 +138,9 @@ func serve(ctx context.Context, cfg *config.Config, ln net.Listener, getenv func
 		_ = ln.Close()
 		return err
 	}
+	// Runs after the drain below, so the spans of the requests that finished
+	// while draining are exported too.
+	defer gw.closeTracing(ctx, logger)
 	srv := api.NewHTTPServer(cfg.Server, gw.Handler())
 
 	serveErr := make(chan error, 1)

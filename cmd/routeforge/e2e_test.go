@@ -131,6 +131,12 @@ func startGatewayWithLogger(t *testing.T, logger *slog.Logger) (baseURL string, 
 // startGatewayConfig is startGateway over a configuration the caller built.
 func startGatewayConfig(t *testing.T, cfg *config.Config, logger *slog.Logger) (baseURL string, stop func() error) {
 	t.Helper()
+	return startGatewayEnv(t, cfg, logger, func(string) string { return "" })
+}
+
+// startGatewayEnv is startGatewayConfig over an environment the caller chose.
+func startGatewayEnv(t *testing.T, cfg *config.Config, logger *slog.Logger, getenv func(string) string) (baseURL string, stop func() error) {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -139,7 +145,7 @@ func startGatewayConfig(t *testing.T, cfg *config.Config, logger *slog.Logger) (
 	ctx, cancel := context.WithCancel(context.Background())
 	errc := make(chan error, 1)
 	go func() {
-		errc <- serve(ctx, cfg, ln, func(string) string { return "" }, logger)
+		errc <- serve(ctx, cfg, ln, getenv, logger)
 	}()
 
 	var once sync.Once

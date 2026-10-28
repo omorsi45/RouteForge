@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"time"
 
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/omorsi45/routeforge/internal/accounting"
 	"github.com/omorsi45/routeforge/internal/api"
 	"github.com/omorsi45/routeforge/internal/config"
@@ -155,8 +157,8 @@ func buildBreakers(cfg *config.Config) *reliability.Breakers {
 // buildExecutor returns the executor over the configured models: retries and
 // failover as reliability sets them, guarded by the breakers and queues and
 // feeding the latency estimators with every successful call. Its attempts are
-// reported to metrics, which may be nil.
-func buildExecutor(cfg *config.Config, providers map[string]provider.Provider, breakers *reliability.Breakers, queues *reliability.Queues, latency *health.Registry, metrics *telemetry.Metrics) *executor.Executor {
+// reported to metrics and traced by tracer, either of which may be nil.
+func buildExecutor(cfg *config.Config, providers map[string]provider.Provider, breakers *reliability.Breakers, queues *reliability.Queues, latency *health.Registry, metrics *telemetry.Metrics, tracer trace.Tracer) *executor.Executor {
 	r := cfg.Reliability
 	return executor.NewWithOptions(executor.Options{
 		Targets:     buildTargets(cfg, providers),
@@ -167,6 +169,7 @@ func buildExecutor(cfg *config.Config, providers map[string]provider.Provider, b
 		Health:      latency,
 		MaxAttempts: r.MaxAttempts,
 		Metrics:     metrics,
+		Tracer:      tracer,
 	})
 }
 
