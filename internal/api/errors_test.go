@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -184,6 +185,83 @@ func TestFromUpstreamError(t *testing.T) {
 			}
 			if got.Status >= 500 && strings.Contains(got.Message, secret) {
 				t.Errorf("Message %q leaks upstream text", got.Message)
+			}
+		})
+	}
+}
+
+// TestUpstreamTextNeverReachesAnyErrorResponse sends a marker in every field of
+// an upstream failure and checks that no response of the gateway carries it,
+// whatever the kind and wherever in the exchange the failure happens: only the
+// kind reaches the client. The kinds are all those that map to a 429 or a 5xx.
+func TestUpstreamTextNeverReachesAnyErrorResponse(t *testing.T) {
+	const marker = "upstream-secret-marker"
+	kinds := []struct {
+		kind       provider.ErrorKind
+		status     int
+		code       string
+		streamCode string // the code of the terminal event after the first byte
+	}{
+		{provider.KindUnavailable, http.StatusBadGateway, CodeUpstreamError, CodeUpstreamStreamInterrupted},
+		{provider.KindInternal, http.StatusBadGateway, CodeUpstreamError, CodeUpstreamStreamInterrupted},
+		{provider.KindAuth, http.StatusBadGateway, CodeUpstreamError, CodeUpstreamStreamInterrupted},
+		{provider.KindRateLimited, http.StatusTooManyRequests, CodeRateLimited, CodeUpstreamStreamInterrupted},
+		{provider.KindTimeout, http.StatusGatewayTimeout, CodeDeadlineExceeded, CodeDeadlineExceeded},
+	}
+	for _, k := range kinds {
+		perr := &provider.Error{
+			Kind: k.kind, Provider: "p-strong", Status: 500, RetryAfter: 2 * time.Second,
+			Message: marker, Err: errors.New(marker),
+		}
+		// leaks reports where the marker shows up in rec, in the body or in any
+		// header.
+		leaks := func(rec *httptest.ResponseRecorder) []string {
+			var where []string
+			if strings.Contains(rec.Body.String(), marker) {
+				where = append(where, "body: "+rec.Body.String())
+			}
+			for name, values := range rec.Header() {
+				if strings.Contains(name+strings.Join(values, ","), marker) {
+					where = append(where, "header "+name)
+				}
+			}
+			return where
+		}
+
+		t.Run(string(k.kind)+"/json", func(t *testing.T) {
+			strong := &stubProvider{complete: func(context.Context, provider.Request) (*provider.Response, error) { return nil, perr }}
+			srv := newServer(t, testConfig(), map[string]provider.Provider{"p-strong": strong})
+			rec := do(t, srv.Handler(), http.MethodPost, "/v1/chat/completions", keyA, okBody, nil)
+			wantError(t, rec, k.status, k.code)
+			if where := leaks(rec); len(where) > 0 {
+				t.Errorf("the response leaks upstream text: %v", where)
+			}
+		})
+
+		t.Run(string(k.kind)+"/stream before the first byte", func(t *testing.T) {
+			strong := &stubProvider{stream: func(context.Context, provider.Request) (provider.Stream, error) { return nil, perr }}
+			srv := newServer(t, testConfig(), map[string]provider.Provider{"p-strong": strong})
+			rec := do(t, srv.Handler(), http.MethodPost, "/v1/chat/completions", keyA, streamBody, nil)
+			wantError(t, rec, k.status, k.code)
+			if where := leaks(rec); len(where) > 0 {
+				t.Errorf("the response leaks upstream text: %v", where)
+			}
+		})
+
+		t.Run(string(k.kind)+"/stream after the first byte", func(t *testing.T) {
+			strong := streamingProvider(&stubStream{events: []provider.StreamEvent{{Delta: "first"}}, err: perr})
+			srv := newServer(t, testConfig(), map[string]provider.Provider{"p-strong": strong})
+			rec := do(t, srv.Handler(), http.MethodPost, "/v1/chat/completions", keyA, streamBody, nil)
+			// The headers are out by then, so the failure is a terminal event.
+			_, done, errEvent := readSSE(t, rec.Body.String())
+			if rec.Code != http.StatusOK || done || errEvent == nil {
+				t.Fatalf("status = %d, [DONE] = %v, error event = %v; want 200 and a terminal error event: %s", rec.Code, done, errEvent, rec.Body)
+			}
+			if got := errEvent["error"].(map[string]any)["code"]; got != k.streamCode {
+				t.Errorf("terminal event code = %v, want %s", got, k.streamCode)
+			}
+			if where := leaks(rec); len(where) > 0 {
+				t.Errorf("the response leaks upstream text: %v", where)
 			}
 		})
 	}
