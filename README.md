@@ -1,4 +1,20 @@
+<div align="center">
+
 # RouteForge
+
+**An OpenAI-compatible LLM gateway that sends each request to the cheapest model likely to answer it well.**
+
+Calibrated success prediction, certified routing thresholds, explainable decisions, retries and failover, exact budget accounting, and reproducible benchmarks for cost-aware LLM serving.
+
+[![CI](https://github.com/omorsi45/RouteForge/actions/workflows/ci.yml/badge.svg)](https://github.com/omorsi45/RouteForge/actions/workflows/ci.yml)
+[![Integration](https://github.com/omorsi45/RouteForge/actions/workflows/integration.yml/badge.svg)](https://github.com/omorsi45/RouteForge/actions/workflows/integration.yml)
+![Go](https://img.shields.io/badge/Go-1.27%2B-00ADD8?logo=go&logoColor=white)
+![License](https://img.shields.io/badge/License-Apache--2.0-blue)
+![Focus](https://img.shields.io/badge/Focus-LLM%20Routing-black)
+
+</div>
+
+---
 
 RouteForge is an OpenAI-compatible LLM gateway written in Go. For each request it picks the cheapest model whose calibrated, conservatively bounded probability of answering well clears a threshold, and escalates to a stronger model when none does. Every decision is recorded and can be explained.
 
