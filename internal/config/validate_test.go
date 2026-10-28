@@ -119,6 +119,49 @@ func TestValidateRejects(t *testing.T) {
 	}
 }
 
+func TestAdminKeyDistinctFromTenant(t *testing.T) {
+	t.Run("no admin keys is valid", func(t *testing.T) {
+		if err := valid(t).Validate(); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+	})
+	t.Run("a distinct admin digest is valid", func(t *testing.T) {
+		c := valid(t)
+		c.Admin.APIKeySHA256 = []string{strings.Repeat("b", 64), strings.Repeat("c", 64)}
+		if err := c.Validate(); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+	})
+
+	rejects := []struct {
+		name   string
+		digest func(c *config.Config) []string
+		want   string
+	}{
+		{"equal to a tenant digest", func(c *config.Config) []string {
+			return []string{c.Tenants[0].APIKeySHA256[0]}
+		}, "admin.api_key_sha256[0]: an admin key may not also be a tenant key (duplicates tenants[0].api_key_sha256[0])"},
+		{"equal to a tenant digest after a valid one", func(c *config.Config) []string {
+			return []string{strings.Repeat("b", 64), c.Tenants[0].APIKeySHA256[0]}
+		}, "admin.api_key_sha256[1]: an admin key may not also be a tenant key"},
+		{"malformed", func(*config.Config) []string { return []string{"ABC"} },
+			"admin.api_key_sha256[0]: must be 64 lowercase hex characters"},
+		{"repeated", func(*config.Config) []string {
+			return []string{strings.Repeat("b", 64), strings.Repeat("b", 64)}
+		}, "admin.api_key_sha256[1]: duplicates admin.api_key_sha256[0]"},
+	}
+	for _, tc := range rejects {
+		t.Run(tc.name, func(t *testing.T) {
+			c := valid(t)
+			c.Admin.APIKeySHA256 = tc.digest(c)
+			err := c.Validate()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Validate = %v, want an error containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestValidateModelPricePair(t *testing.T) {
 	c := valid(t)
 	c.Models[0].InputPerMTok = ptr(1.0)

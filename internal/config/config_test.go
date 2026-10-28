@@ -171,6 +171,38 @@ func TestModelDefaults(t *testing.T) {
 	}
 }
 
+func TestParseAdminSection(t *testing.T) {
+	digest := strings.Repeat("b", 64)
+
+	c, err := config.Parse([]byte(minimalDoc + "admin:\n  api_key_sha256:\n    - " + digest + "\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := c.Admin.APIKeySHA256; len(got) != 1 || got[0] != digest {
+		t.Errorf("Admin.APIKeySHA256 = %v, want [%s]", got, digest)
+	}
+
+	c, err = config.Parse([]byte(minimalDoc))
+	if err != nil {
+		t.Fatalf("Parse without admin: %v", err)
+	}
+	if len(c.Admin.APIKeySHA256) != 0 {
+		t.Errorf("Admin.APIKeySHA256 = %v, want none", c.Admin.APIKeySHA256)
+	}
+
+	// The tenant's own digest cannot also be an admin key.
+	tenant := strings.Repeat("a", 64)
+	_, err = config.Parse([]byte(minimalDoc + "admin:\n  api_key_sha256:\n    - " + tenant + "\n"))
+	if err == nil || !strings.Contains(err.Error(), "admin.api_key_sha256[0]") {
+		t.Errorf("Parse with a tenant digest as admin key: err = %v", err)
+	}
+
+	_, err = config.Parse([]byte(minimalDoc + "admin:\n  keys: []\n"))
+	if err == nil || !strings.Contains(err.Error(), "keys") {
+		t.Errorf("Parse with an unknown admin field: err = %v", err)
+	}
+}
+
 func TestParseRoutingFields(t *testing.T) {
 	doc := strings.Replace(minimalDoc, "    provider: fake\n", `    provider: fake
     input_per_mtok: 0

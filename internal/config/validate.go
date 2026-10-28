@@ -43,7 +43,8 @@ func (c *Config) Validate() error {
 
 	c.validateProviders(add)
 	c.validateModels(add)
-	c.validateTenants(add)
+	tenantDigests := c.validateTenants(add)
+	c.validateAdmin(tenantDigests, add)
 
 	return errors.Join(errs...)
 }
@@ -228,7 +229,9 @@ func validateModelRouting(base string, m Model, add addFunc) {
 	}
 }
 
-func (c *Config) validateTenants(add addFunc) {
+// validateTenants checks the tenants and returns the YAML path of every
+// well-formed key digest, by digest.
+func (c *Config) validateTenants(add addFunc) map[string]string {
 	names := map[string]int{}
 	digests := map[string]string{}
 	for i, t := range c.Tenants {
@@ -271,6 +274,29 @@ func (c *Config) validateTenants(add addFunc) {
 				add(fmt.Sprintf("%s.allowed_models[%d]", base, k), "unknown model %q", m)
 			}
 		}
+	}
+	return digests
+}
+
+// validateAdmin checks the admin key digests: well formed, unique, and not
+// also a tenant key, so an admin key never opens a tenant's routes.
+func (c *Config) validateAdmin(tenantDigests map[string]string, add addFunc) {
+	seen := map[string]string{}
+	for i, d := range c.Admin.APIKeySHA256 {
+		path := fmt.Sprintf("admin.api_key_sha256[%d]", i)
+		if !hexDigestRE.MatchString(d) {
+			add(path, "must be 64 lowercase hex characters")
+			continue
+		}
+		if tenant, dup := tenantDigests[d]; dup {
+			add(path, "an admin key may not also be a tenant key (duplicates %s)", tenant)
+			continue
+		}
+		if first, dup := seen[d]; dup {
+			add(path, "duplicates %s", first)
+			continue
+		}
+		seen[d] = path
 	}
 }
 

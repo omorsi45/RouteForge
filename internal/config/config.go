@@ -28,6 +28,7 @@ type Config struct {
 	Defaults  Defaults   `yaml:"defaults"`
 	Policy    Policy     `yaml:"policy"`
 	Pricing   Pricing    `yaml:"pricing"`
+	Admin     Admin      `yaml:"admin"`
 	Tenants   []Tenant   `yaml:"tenants"`
 	Providers []Provider `yaml:"providers"`
 	Models    []Model    `yaml:"models"`
@@ -36,6 +37,12 @@ type Config struct {
 	// a Config built by Parse. Relative file paths in the config resolve
 	// against it.
 	Dir string `yaml:"-"`
+}
+
+// Admin holds the keys that may call the /admin routes, as SHA-256 digests
+// like tenant keys. Without a key the admin routes do not exist.
+type Admin struct {
+	APIKeySHA256 []string `yaml:"api_key_sha256"`
 }
 
 // Policy locates the trained routing policy artifact.

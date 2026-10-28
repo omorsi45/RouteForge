@@ -41,7 +41,7 @@ type Options struct {
 	Router      router.Router
 	Executor    *executor.Executor
 	Decisions   store.DecisionStore // nil: a ring of 10,000 decisions
-	Policies    *policy.Registry    // the registry the router reads; may be nil
+	Policies    *policy.Registry    // the registry the router reads; may be nil, and then the admin routes do not exist
 	Logger      *slog.Logger        // nil: slog.New(slog.DiscardHandler)
 	Now         func() time.Time    // nil: time.Now
 	ReadyChecks []ReadyCheck
@@ -51,6 +51,7 @@ type Options struct {
 type Server struct {
 	cfg       *config.Config
 	keys      *auth.Store
+	adminKeys map[string]struct{} // digests of the admin keys
 	router    router.Router
 	exec      *executor.Executor
 	decisions store.DecisionStore
@@ -66,6 +67,7 @@ func New(o Options) *Server {
 	s := &Server{
 		cfg:       o.Config,
 		keys:      o.Keys,
+		adminKeys: make(map[string]struct{}, len(o.Config.Admin.APIKeySHA256)),
 		router:    o.Router,
 		exec:      o.Executor,
 		decisions: o.Decisions,
@@ -73,6 +75,9 @@ func New(o Options) *Server {
 		logger:    o.Logger,
 		now:       o.Now,
 		checks:    o.ReadyChecks,
+	}
+	for _, digest := range o.Config.Admin.APIKeySHA256 {
+		s.adminKeys[digest] = struct{}{}
 	}
 	if s.decisions == nil {
 		s.decisions = store.NewRing(defaultDecisionCapacity)
@@ -93,6 +98,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/chat/completions", s.handleChat)
 	mux.HandleFunc("POST /v1/routing/explain", s.handleExplain)
 	mux.HandleFunc("GET /v1/routing/decisions/{id}", s.handleDecision)
+	mux.HandleFunc("GET /admin/policies", s.handleAdminList)
+	mux.HandleFunc("POST /admin/policies", s.handleAdminUpload)
+	mux.HandleFunc("POST /admin/policies/rollback", s.handleAdminRollback)
+	mux.HandleFunc("POST /admin/policies/{version}/activate", s.handleAdminActivate)
 	mux.HandleFunc("GET /v1/models", s.handleModels)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /readyz", s.handleReadyz)

@@ -32,6 +32,7 @@ const (
 	CodeUpstreamStreamInterrupted = "upstream_stream_interrupted"
 	CodeNotFound                  = "not_found"
 	CodeInternalError             = "internal_error"
+	CodeNoPreviousPolicy          = "no_previous_policy"
 )
 
 // Error is an API failure that maps onto the OpenAI error envelope.
