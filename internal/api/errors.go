@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/omorsi45/routeforge/internal/executor"
 	"github.com/omorsi45/routeforge/internal/provider"
 	"github.com/omorsi45/routeforge/internal/router"
 )
@@ -158,10 +159,15 @@ func fromRouterError(err error) *Error {
 	return &Error{Status: http.StatusBadGateway, Code: CodeUpstreamError, Message: "routing failed"}
 }
 
-// fromUpstreamError maps a provider failure to an API error. Upstream text
-// reaches the client only for 4xx kinds the client can act on; 5xx responses
-// carry the kind alone.
+// fromUpstreamError maps an executor or provider failure to an API error.
+// Upstream text reaches the client only for 4xx kinds the client can act on;
+// 5xx responses carry the kind alone. A request no model accepted is the
+// gateway's own overload: 503 overloaded, like a full queue found by the
+// router.
 func fromUpstreamError(err error) *Error {
+	if errors.Is(err, executor.ErrNoTargetAccepted) {
+		return &Error{Status: http.StatusServiceUnavailable, Code: CodeOverloaded, Message: executor.ErrNoTargetAccepted.Error(), RetryAfter: time.Second}
+	}
 	kind := provider.KindOf(err)
 	var pe *provider.Error
 	if !errors.As(err, &pe) {

@@ -292,6 +292,89 @@ func TestTicketDoneOnRejectedTicketIsNoop(t *testing.T) {
 	wantState(t, b, model, StateOpen)
 }
 
+func TestBreakerCanceledProbeReleasesSlot(t *testing.T) {
+	b, clk := tripped(t)
+	clk.Advance(15 * time.Second)
+
+	first, ok := b.Allow(model)
+	if !ok {
+		t.Fatal("first probe rejected")
+	}
+	if _, ok := b.Allow(model); !ok {
+		t.Fatal("second probe rejected")
+	}
+	if _, ok := b.Allow(model); ok {
+		t.Fatal("third probe admitted while two are in flight")
+	}
+
+	// The first probe ended without a verdict: its slot is free again.
+	first.Cancel()
+	third, ok := b.Allow(model)
+	if !ok {
+		t.Fatal("Allow rejected after a probe was canceled")
+	}
+	wantState(t, b, model, StateHalfOpen) // a canceled probe says nothing about the model
+
+	// The limit still holds: two probes in flight again.
+	if _, ok := b.Allow(model); ok {
+		t.Fatal("a fourth probe was admitted")
+	}
+	third.Done(true)
+	wantState(t, b, model, StateClosed)
+}
+
+func TestBreakerCancelRecordsNothingWhileClosed(t *testing.T) {
+	b, _ := newBreakers()
+	runAll(t, b, model, false, false, false, false)
+	// Canceled tickets are neither failures nor successes: they must neither
+	// extend the streak nor break it.
+	for range 20 {
+		ticket, ok := b.Allow(model)
+		if !ok {
+			t.Fatal("Allow rejected while closed")
+		}
+		ticket.Cancel()
+	}
+	wantState(t, b, model, StateClosed)
+	run(t, b, model, false) // the fifth failure in a row
+	wantState(t, b, model, StateOpen)
+}
+
+func TestBreakerCancelOfStaleProbeIsIgnored(t *testing.T) {
+	b, clk := tripped(t)
+	clk.Advance(15 * time.Second)
+
+	first, _ := b.Allow(model)
+	stale, _ := b.Allow(model)
+	first.Done(true) // closes the breaker; stale was issued before that
+	wantState(t, b, model, StateClosed)
+
+	// Trip it again and let two new probes in. The probe count belongs to this
+	// half-open period, so the late Cancel of an older probe must not lower it.
+	runAll(t, b, model, false, false, false, false, false)
+	wantState(t, b, model, StateOpen)
+	clk.Advance(15 * time.Second)
+	for i := 1; i <= 2; i++ {
+		if _, ok := b.Allow(model); !ok {
+			t.Fatalf("probe %d rejected", i)
+		}
+	}
+	stale.Cancel()
+	if _, ok := b.Allow(model); ok {
+		t.Fatal("third probe admitted: a stale Cancel freed a slot it did not own")
+	}
+}
+
+func TestTicketCancelOnRejectedTicketIsNoop(t *testing.T) {
+	b, _ := tripped(t)
+	ticket, ok := b.Allow(model)
+	if ok {
+		t.Fatal("Allow admitted a request through an open breaker")
+	}
+	ticket.Cancel() // must not panic or change anything
+	wantState(t, b, model, StateOpen)
+}
+
 func TestNewBreakersDefaultsClock(t *testing.T) {
 	b := NewBreakers(specBreaker(), nil)
 	run(t, b, model, true)

@@ -116,7 +116,7 @@ func oneAttempt(t *testing.T, d *router.Decision) router.Attempt {
 func TestCompleteSetsUpstreamAndRecordsAttempt(t *testing.T) {
 	p := &stubProvider{complete: okComplete}
 	d := decision("m")
-	res, err := newExec(p).Complete(context.Background(), d, provider.Request{Model: "client-name"})
+	res, err := newExec(p).Complete(context.Background(), d, provider.Request{Model: "client-name"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +161,7 @@ func TestAttemptDurationHasMicrosecondResolution(t *testing.T) {
 				"m": {Model: "m", Upstream: "up-1", Provider: p},
 			}, steppingClock(tc.step))
 			d := decision("m")
-			if _, err := e.Complete(context.Background(), d, provider.Request{}); err != nil {
+			if _, err := e.Complete(context.Background(), d, provider.Request{}, nil); err != nil {
 				t.Fatal(err)
 			}
 			if got := oneAttempt(t, d).DurationMS; got != tc.want {
@@ -177,7 +177,7 @@ func TestCompleteErrorAttempt(t *testing.T) {
 		return nil, want
 	}}
 	d := decision("m")
-	_, err := newExec(p).Complete(context.Background(), d, provider.Request{})
+	_, err := newExec(p).Complete(context.Background(), d, provider.Request{}, nil)
 	if !errors.Is(err, want) {
 		t.Fatalf("err = %v, want %v", err, want)
 	}
@@ -192,7 +192,7 @@ func TestCompleteCanceledAttempt(t *testing.T) {
 		return nil, fmt.Errorf("x: %w", context.Canceled)
 	}}
 	d := decision("m")
-	_, err := newExec(p).Complete(context.Background(), d, provider.Request{})
+	_, err := newExec(p).Complete(context.Background(), d, provider.Request{}, nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v", err)
 	}
@@ -206,12 +206,12 @@ func TestUnknownTarget(t *testing.T) {
 	p := &stubProvider{complete: okComplete, stream: streamOf(&stubStream{})}
 	e := newExec(p)
 
-	_, err := e.Complete(context.Background(), decision("ghost"), provider.Request{})
+	_, err := e.Complete(context.Background(), decision("ghost"), provider.Request{}, nil)
 	var pe *provider.Error
 	if !errors.As(err, &pe) || pe.Kind != provider.KindInternal {
 		t.Fatalf("Complete err = %v, want internal *provider.Error", err)
 	}
-	_, err = e.Stream(context.Background(), decision("ghost"), provider.Request{})
+	_, err = e.Stream(context.Background(), decision("ghost"), provider.Request{}, nil)
 	if !errors.As(err, &pe) || pe.Kind != provider.KindInternal {
 		t.Fatalf("Stream err = %v, want internal *provider.Error", err)
 	}
@@ -224,7 +224,7 @@ func TestStreamPrimesFirstEvent(t *testing.T) {
 	ss := &stubStream{steps: []step{{ev: provider.StreamEvent{Delta: "a"}}, {ev: provider.StreamEvent{Delta: "b"}}}}
 	p := &stubProvider{stream: streamOf(ss)}
 	d := decision("m")
-	s, err := newExec(p).Stream(context.Background(), d, provider.Request{})
+	s, err := newExec(p).Stream(context.Background(), d, provider.Request{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +258,7 @@ func TestStreamOpenFailure(t *testing.T) {
 		return nil, want
 	}}
 	d := decision("m")
-	_, err := newExec(p).Stream(context.Background(), d, provider.Request{})
+	_, err := newExec(p).Stream(context.Background(), d, provider.Request{}, nil)
 	if !errors.Is(err, want) {
 		t.Fatalf("err = %v, want %v", err, want)
 	}
@@ -273,7 +273,7 @@ func TestStreamFirstRecvFailure(t *testing.T) {
 	ss := &stubStream{steps: []step{{err: want}}}
 	p := &stubProvider{stream: streamOf(ss)}
 	d := decision("m")
-	s, err := newExec(p).Stream(context.Background(), d, provider.Request{})
+	s, err := newExec(p).Stream(context.Background(), d, provider.Request{}, nil)
 	if !errors.Is(err, want) || s != nil {
 		t.Fatalf("stream = %v, err = %v; want nil stream and %v", s, err, want)
 	}
@@ -290,7 +290,7 @@ func TestStreamMidFailureIsPartial(t *testing.T) {
 	boom := &provider.Error{Kind: provider.KindUnavailable, Provider: "p", Message: "cut"}
 	ss := &stubStream{steps: []step{{ev: provider.StreamEvent{Delta: "a"}}, {err: boom}}}
 	d := decision("m")
-	s, err := newExec(&stubProvider{stream: streamOf(ss)}).Stream(context.Background(), d, provider.Request{})
+	s, err := newExec(&stubProvider{stream: streamOf(ss)}).Stream(context.Background(), d, provider.Request{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,7 +312,7 @@ func TestStreamMidFailureIsPartial(t *testing.T) {
 func TestStreamCloseEarlyIsCanceled(t *testing.T) {
 	ss := &stubStream{steps: []step{{ev: provider.StreamEvent{Delta: "a"}}, {ev: provider.StreamEvent{Delta: "b"}}}}
 	d := decision("m")
-	s, err := newExec(&stubProvider{stream: streamOf(ss)}).Stream(context.Background(), d, provider.Request{})
+	s, err := newExec(&stubProvider{stream: streamOf(ss)}).Stream(context.Background(), d, provider.Request{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,7 +331,7 @@ func TestStreamCloseEarlyIsCanceled(t *testing.T) {
 func TestStreamEmpty(t *testing.T) {
 	ss := &stubStream{}
 	d := decision("m")
-	s, err := newExec(&stubProvider{stream: streamOf(ss)}).Stream(context.Background(), d, provider.Request{})
+	s, err := newExec(&stubProvider{stream: streamOf(ss)}).Stream(context.Background(), d, provider.Request{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -350,7 +350,7 @@ func TestStreamCanceledMidStream(t *testing.T) {
 		{err: fmt.Errorf("x: %w", context.Canceled)},
 	}}
 	d := decision("m")
-	s, err := newExec(&stubProvider{stream: streamOf(ss)}).Stream(context.Background(), d, provider.Request{})
+	s, err := newExec(&stubProvider{stream: streamOf(ss)}).Stream(context.Background(), d, provider.Request{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -375,7 +375,7 @@ func TestStreamCloseRacesRecv(t *testing.T) {
 		}
 		ss := &stubStream{steps: steps}
 		d := decision("m")
-		s, err := newExec(&stubProvider{stream: streamOf(ss)}).Stream(context.Background(), d, provider.Request{})
+		s, err := newExec(&stubProvider{stream: streamOf(ss)}).Stream(context.Background(), d, provider.Request{}, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

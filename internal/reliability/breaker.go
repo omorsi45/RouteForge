@@ -127,12 +127,23 @@ type Ticket struct {
 }
 
 // Done reports the outcome of the request: true for a success. A caller with an
-// error passes !CountsAsFailure(err). An outcome from before the breaker last
-// changed state is ignored, since it describes a model that has since been
-// judged again.
+// error passes !CountsAsFailure(err), except for a canceled call, which has no
+// outcome to report and ends with Cancel instead. An outcome from before the
+// breaker last changed state is ignored, since it describes a model that has
+// since been judged again.
 func (t Ticket) Done(success bool) {
 	if t.b != nil {
 		t.b.done(t, success)
+	}
+}
+
+// Cancel gives the ticket back without a verdict, for a request that ended
+// before it said anything about the model: the client left, or the request was
+// never sent. A half-open breaker gets its probe slot back; a closed breaker
+// records nothing. Like Done, call it exactly once, and not after Done.
+func (t Ticket) Cancel() {
+	if t.b != nil {
+		t.b.cancel(t)
 	}
 }
 
@@ -191,6 +202,17 @@ func (b *breaker) done(t Ticket, success bool) {
 		return
 	}
 	b.record(now, success)
+}
+
+// cancel frees the probe slot of a half-open ticket. A ticket from an older
+// epoch holds no slot of the current one: the state change reset the probe
+// count.
+func (b *breaker) cancel(t Ticket) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if t.probe && t.epoch == b.epoch && b.probes > 0 {
+		b.probes--
+	}
 }
 
 // refresh turns an open breaker whose OpenFor has elapsed into a half-open one.

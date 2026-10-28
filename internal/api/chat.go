@@ -230,7 +230,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 // serveJSON runs the non-streaming call and writes the completion.
 func (s *Server) serveJSON(w http.ResponseWriter, r *http.Request, st *chatState, preq provider.Request) {
-	res, err := s.exec.Complete(st.deadlineCtx, st.decision, preq)
+	res, err := s.exec.Complete(st.deadlineCtx, st.decision, preq, nil)
 	// The executor has recorded the attempt, so the decision is final. Store
 	// it before replying so a client that has the response can read it back.
 	s.storeDecision(r, st.decision)

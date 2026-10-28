@@ -135,6 +135,36 @@ func buildQueues(cfg *config.Config) *reliability.Queues {
 	return reliability.NewQueues(limits)
 }
 
+// buildBreakers returns the circuit breakers of the configured models, set from
+// the reliability.breaker section. They are created on first use per model.
+func buildBreakers(cfg *config.Config) *reliability.Breakers {
+	b := cfg.Reliability.Breaker
+	return reliability.NewBreakers(reliability.BreakerConfig{
+		ConsecutiveFailures: b.ConsecutiveFailures,
+		ErrorRate:           b.ErrorRate,
+		MinRequests:         b.MinRequests,
+		Window:              b.Window,
+		OpenFor:             b.OpenFor,
+		HalfOpenProbes:      b.HalfOpenProbes,
+	}, nil)
+}
+
+// buildExecutor returns the executor over the configured models: retries and
+// failover as reliability sets them, guarded by the breakers and queues and
+// feeding the latency estimators with every successful call.
+func buildExecutor(cfg *config.Config, providers map[string]provider.Provider, breakers *reliability.Breakers, queues *reliability.Queues, latency *health.Registry) *executor.Executor {
+	r := cfg.Reliability
+	return executor.NewWithOptions(executor.Options{
+		Targets:     buildTargets(cfg, providers),
+		Breakers:    breakers,
+		Queues:      queues,
+		RetryBudget: reliability.NewRetryBudget(r.RetryBudgetRatio, r.RetryBudgetWindow, r.RetryBudgetMin, nil),
+		Backoff:     reliability.Backoff{Base: r.BackoffBase, Cap: r.BackoffCap},
+		Health:      latency,
+		MaxAttempts: r.MaxAttempts,
+	})
+}
+
 // buildTargets binds each configured model to its provider's instance.
 func buildTargets(cfg *config.Config, providers map[string]provider.Provider) map[string]executor.Target {
 	targets := make(map[string]executor.Target, len(cfg.Models))

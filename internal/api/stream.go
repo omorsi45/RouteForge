@@ -96,12 +96,13 @@ func (c *chunkWriter) encode(ev provider.StreamEvent) ([]byte, error) {
 
 // serveStream runs the streaming call and relays it as server-sent events.
 //
-// executor.Stream returns with the first event already read, so a failure
-// before the first byte is an ordinary JSON error. After the response is
-// committed an upstream failure is reported as a terminal error event and the
-// stream ends without [DONE]; there is no retry once a byte has gone out.
+// executor.Stream returns with the first event already read, and has retried a
+// failure before it, so what still fails before the first byte is an ordinary
+// JSON error. After the response is committed an upstream failure is reported
+// as a terminal error event and the stream ends without [DONE]; there is no
+// retry once a byte has gone out.
 func (s *Server) serveStream(w http.ResponseWriter, r *http.Request, st *chatState, preq provider.Request) {
-	stream, err := s.exec.Stream(st.deadlineCtx, st.decision, preq)
+	stream, err := s.exec.Stream(st.deadlineCtx, st.decision, preq, nil)
 	if err != nil {
 		s.storeDecision(r, st.decision) // the executor recorded the failed attempt
 		if aerr := st.failure(err); aerr != nil {

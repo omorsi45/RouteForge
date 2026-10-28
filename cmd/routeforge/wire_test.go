@@ -19,12 +19,14 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
 
 	"github.com/omorsi45/routeforge/internal/auth"
 	"github.com/omorsi45/routeforge/internal/config"
+	"github.com/omorsi45/routeforge/internal/executor"
 	"github.com/omorsi45/routeforge/internal/policy"
 	"github.com/omorsi45/routeforge/internal/provider"
 	"github.com/omorsi45/routeforge/internal/provider/anthropic"
@@ -32,6 +34,7 @@ import (
 	"github.com/omorsi45/routeforge/internal/provider/openai"
 	"github.com/omorsi45/routeforge/internal/provider/replay"
 	"github.com/omorsi45/routeforge/internal/reliability"
+	"github.com/omorsi45/routeforge/internal/router"
 )
 
 const wireConfigYAML = `
@@ -688,6 +691,345 @@ models:
 		}
 	case <-time.After(5 * time.Second): // a failure guard, not a wait
 		t.Fatal("the held request never finished")
+	}
+}
+
+// scriptedUpstream is an OpenAI-style upstream that answers its n-th chat
+// request with statuses[n]; the last status repeats. A 200 carries a short
+// completion with usage, any other status a bare error body.
+func scriptedUpstream(t *testing.T, statuses ...int) (url string, hits func() int) {
+	t.Helper()
+	var n atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		status := statuses[min(int(n.Add(1))-1, len(statuses)-1)]
+		w.Header().Set("Content-Type", "application/json")
+		if status != http.StatusOK {
+			w.WriteHeader(status)
+			_, _ = io.WriteString(w, `{"error":{"message":"scripted failure"}}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"id":"c-1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL, func() int { return int(n.Load()) }
+}
+
+// upstreamConfig is a one-model configuration over an OpenAI-style upstream.
+// extra is YAML placed before the tenants, for example a reliability section.
+func upstreamConfig(t *testing.T, upstream, extra string) *config.Config {
+	t.Helper()
+	cfg, err := config.Parse([]byte(fmt.Sprintf(`
+%s
+tenants:
+  - name: e2e
+    api_key_sha256:
+      - %s
+providers:
+  - name: up
+    type: openai
+    base_url: %s/v1
+models:
+  - name: m-up
+    provider: up
+    input_per_mtok: 1
+    output_per_mtok: 2
+`, extra, auth.HashKey(e2eKey), upstream)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
+
+func TestBuildBreakersUsesTheConfiguredThresholds(t *testing.T) {
+	cfg := parseWireConfig(t)
+	cfg.Reliability.Breaker.ConsecutiveFailures = 2
+	b := buildBreakers(cfg)
+
+	fail := func() {
+		t.Helper()
+		ticket, ok := b.Allow("m-oa")
+		if !ok {
+			t.Fatal("Allow refused a request")
+		}
+		ticket.Done(false)
+	}
+	fail()
+	if b.IsOpen("m-oa") {
+		t.Fatal("the breaker opened after one failure, want two")
+	}
+	fail()
+	if !b.IsOpen("m-oa") {
+		t.Fatal("the breaker did not open after two consecutive failures")
+	}
+	if b.IsOpen("m-an") {
+		t.Fatal("the breaker of another model opened")
+	}
+}
+
+// downProvider fails every call as unavailable and counts the calls.
+type downProvider struct{ calls atomic.Int32 }
+
+func (p *downProvider) Complete(context.Context, provider.Request) (*provider.Response, error) {
+	p.calls.Add(1)
+	return nil, &provider.Error{Kind: provider.KindUnavailable, Provider: "down", Message: "down"}
+}
+
+func (p *downProvider) Stream(context.Context, provider.Request) (provider.Stream, error) {
+	p.calls.Add(1)
+	return nil, &provider.Error{Kind: provider.KindUnavailable, Provider: "down", Message: "down"}
+}
+
+// buildDownExecutor returns the executor buildExecutor makes for cfg when every
+// model's provider is down, and that provider.
+func buildDownExecutor(cfg *config.Config) (*executor.Executor, *downProvider) {
+	down := &downProvider{}
+	providers := map[string]provider.Provider{"oa": down, "anthropic": down, "fk": down}
+	return buildExecutor(cfg, providers, buildBreakers(cfg), buildQueues(cfg), buildHealth(cfg)), down
+}
+
+func TestBuildExecutorAppliesTheReliabilitySettings(t *testing.T) {
+	pinned := func() *router.Decision {
+		return &router.Decision{Chosen: "m-oa", Fallbacks: []string{}, Attempts: []router.Attempt{}}
+	}
+
+	t.Run("max attempts and retry budget", func(t *testing.T) {
+		cases := []struct {
+			name         string
+			attempts     int
+			budgetFloor  int
+			wantAttempts int32
+		}{
+			{"attempts bound the calls", 2, 3, 2},
+			{"the budget bounds the retries", 4, 1, 2}, // 20% of one request is 0, plus the floor of 1
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				cfg := parseWireConfig(t)
+				cfg.Reliability.MaxAttempts = tc.attempts
+				cfg.Reliability.RetryBudgetMin = tc.budgetFloor
+				cfg.Reliability.BackoffBase, cfg.Reliability.BackoffCap = time.Millisecond, time.Millisecond
+				ex, down := buildDownExecutor(cfg)
+
+				if _, err := ex.Complete(context.Background(), pinned(), provider.Request{}, nil); err == nil {
+					t.Fatal("want the upstream error")
+				}
+				if got := down.calls.Load(); got != tc.wantAttempts {
+					t.Fatalf("provider called %d times, want %d", got, tc.wantAttempts)
+				}
+			})
+		}
+	})
+
+	t.Run("backoff", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			cfg := parseWireConfig(t)
+			cfg.Reliability.MaxAttempts = 2
+			cfg.Reliability.BackoffBase, cfg.Reliability.BackoffCap = 100*time.Millisecond, 100*time.Millisecond
+			ex, down := buildDownExecutor(cfg)
+
+			start := time.Now()
+			if _, err := ex.Complete(context.Background(), pinned(), provider.Request{}, nil); err == nil {
+				t.Fatal("want the upstream error")
+			}
+			if got := down.calls.Load(); got != 2 {
+				t.Fatalf("provider called %d times, want 2", got)
+			}
+			// Full jitter: the wait before the retry is drawn from [0, 100ms).
+			if got := time.Since(start); got <= 0 || got >= 100*time.Millisecond {
+				t.Fatalf("waited %v before the retry, want a jittered delay inside (0, 100ms)", got)
+			}
+		})
+	})
+}
+
+func TestGatewayRetriesAnUnavailableUpstream(t *testing.T) {
+	cases := []struct {
+		name       string
+		reliab     string
+		wantStatus int
+		wantHits   int
+	}{
+		{"default attempts", "reliability:\n  backoff_base: 1ms\n  backoff_cap: 2ms\n", http.StatusOK, 2},
+		{"one attempt", "reliability:\n  max_attempts: 1\n", http.StatusBadGateway, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream, hits := scriptedUpstream(t, http.StatusServiceUnavailable, http.StatusOK)
+			base, _ := startGatewayConfig(t, upstreamConfig(t, upstream, tc.reliab), slog.New(slog.DiscardHandler))
+
+			resp := post(t, base, e2eKey, chatBody("m-up", ""))
+			defer resp.Body.Close()
+			raw, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.StatusCode != tc.wantStatus {
+				t.Fatalf("status = %d, want %d; body %s", resp.StatusCode, tc.wantStatus, raw)
+			}
+			if got := hits(); got != tc.wantHits {
+				t.Fatalf("upstream saw %d requests, want %d", got, tc.wantHits)
+			}
+			if tc.wantStatus != http.StatusOK {
+				return
+			}
+			var body struct {
+				RouteForge struct {
+					Attempts int `json:"attempts"`
+				} `json:"routeforge"`
+			}
+			if err := json.Unmarshal(raw, &body); err != nil || body.RouteForge.Attempts != 2 {
+				t.Fatalf("routeforge.attempts = %d (decode error %v), want 2; body %s", body.RouteForge.Attempts, err, raw)
+			}
+		})
+	}
+}
+
+// A model whose breaker has opened stops being routed to: the router sees it
+// through Signals.BreakerOpen and refuses before any upstream call.
+func TestGatewayStopsRoutingToAnOpenBreaker(t *testing.T) {
+	upstream, hits := scriptedUpstream(t, http.StatusServiceUnavailable)
+	cfg := upstreamConfig(t, upstream, "reliability:\n  max_attempts: 1\n  breaker:\n    consecutive_failures: 1\n")
+	base, _ := startGatewayConfig(t, cfg, slog.New(slog.DiscardHandler))
+
+	resp := post(t, base, e2eKey, chatBody("m-up", ""))
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("first request status = %d, want 502", resp.StatusCode)
+	}
+
+	resp = post(t, base, e2eKey, chatBody("m-up", ""))
+	defer resp.Body.Close()
+	var env struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusServiceUnavailable || env.Error.Code != "no_eligible_model" || !strings.Contains(env.Error.Message, "breaker_open") {
+		t.Fatalf("second request: status %d, error %+v; want 503 no_eligible_model naming breaker_open", resp.StatusCode, env.Error)
+	}
+	if got := hits(); got != 1 {
+		t.Fatalf("upstream saw %d requests, want 1: the open breaker must keep the second away", got)
+	}
+}
+
+// The executor holds a model slot for the whole call, so with one slot and no
+// waiting room the router sees the model as full: 503 overloaded.
+func TestGatewayHoldsAModelSlotWhileACallRuns(t *testing.T) {
+	upstream, entered, release := holdingUpstream(t)
+	cfg := upstreamConfig(t, upstream, "")
+	cfg.Models[0].MaxConcurrency, cfg.Models[0].QueueSize = 1, 0 // after defaults: 0 means no room
+	base, _ := startGatewayConfig(t, cfg, slog.New(slog.DiscardHandler))
+	t.Cleanup(release)
+
+	status := make(chan int, 1)
+	go func() {
+		resp := post(t, base, e2eKey, chatBody("m-up", ""))
+		_ = resp.Body.Close()
+		status <- resp.StatusCode
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second): // a failure guard, not a wait
+		t.Fatal("the first request never reached the upstream")
+	}
+
+	resp := post(t, base, e2eKey, chatBody("m-up", ""))
+	defer resp.Body.Close()
+	var env struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusServiceUnavailable || env.Error.Code != "overloaded" {
+		t.Fatalf("second request: status %d, code %q; want 503 overloaded while the only slot is held", resp.StatusCode, env.Error.Code)
+	}
+	if got := resp.Header.Get("Retry-After"); got != "1" {
+		t.Errorf("Retry-After = %q, want 1", got)
+	}
+
+	release()
+	select {
+	case got := <-status:
+		if got != http.StatusOK {
+			t.Fatalf("held request status = %d, want 200", got)
+		}
+	case <-time.After(5 * time.Second): // a failure guard, not a wait
+		t.Fatal("the held request never finished")
+	}
+	// The slot came back with the response.
+	final := post(t, base, e2eKey, chatBody("m-up", ""))
+	_ = final.Body.Close()
+	if final.StatusCode != http.StatusOK {
+		t.Fatalf("request after the slot was freed: status %d, want 200", final.StatusCode)
+	}
+}
+
+// Successful calls feed the latency estimators, so the prediction the router
+// reads moves off the configured prior for the model that served the call and
+// for no other. (A fast call far below the estimate lowers the mean but widens
+// the variance, so the p95 prediction may move either way.)
+func TestGatewayLearnsLatencyFromSuccessfulCalls(t *testing.T) {
+	cfg, err := config.Load("../../deploy/configs/policy-fake.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range cfg.Providers {
+		cfg.Providers[i].Fake.TTFT = 0
+		cfg.Providers[i].Fake.PerToken = 0
+	}
+	base, _ := startGatewayConfig(t, cfg, slog.New(slog.DiscardHandler))
+
+	const body = `{"model":"routeforge-auto","messages":[{"role":"user","content":"hello"}]}`
+	predictions := func() map[string]float64 {
+		t.Helper()
+		resp, raw := apiRequest(t, http.MethodPost, base+"/v1/routing/explain", demoKey, body)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("explain status %d, body %s", resp.StatusCode, raw)
+		}
+		var d struct {
+			Candidates []struct {
+				Model          string   `json:"model"`
+				PredictedP95MS *float64 `json:"predicted_p95_ms"`
+			} `json:"candidates"`
+		}
+		if err := json.Unmarshal(raw, &d); err != nil {
+			t.Fatalf("decode %s: %v", raw, err)
+		}
+		out := map[string]float64{}
+		for _, c := range d.Candidates {
+			if c.PredictedP95MS == nil {
+				t.Fatalf("%s: no predicted_p95_ms", c.Model)
+			}
+			out[c.Model] = *c.PredictedP95MS
+		}
+		return out
+	}
+
+	before := predictions()
+	resp, raw := apiRequest(t, http.MethodPost, base+"/v1/chat/completions", demoKey, body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("chat status %d, body %s", resp.StatusCode, raw)
+	}
+	served := resp.Header.Get("X-RouteForge-Model")
+	after := predictions()
+
+	if _, ok := before[served]; !ok {
+		t.Fatalf("served model %q is not a candidate", served)
+	}
+	for model, was := range before {
+		switch got := after[model]; {
+		case model == served && got == was:
+			t.Errorf("%s served the call, but its prediction stayed at %v", model, was)
+		case model != served && got != was:
+			t.Errorf("%s did not serve the call, but its prediction went from %v to %v", model, was, got)
+		}
 	}
 }
 

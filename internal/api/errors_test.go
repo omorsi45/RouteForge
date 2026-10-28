@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -10,7 +11,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/omorsi45/routeforge/internal/executor"
 	"github.com/omorsi45/routeforge/internal/provider"
+	"github.com/omorsi45/routeforge/internal/reliability"
 	"github.com/omorsi45/routeforge/internal/router"
 )
 
@@ -181,6 +184,59 @@ func TestFromUpstreamError(t *testing.T) {
 			}
 			if got.Status >= 500 && strings.Contains(got.Message, secret) {
 				t.Errorf("Message %q leaks upstream text", got.Message)
+			}
+		})
+	}
+}
+
+func TestNoTargetAcceptedMapsTo503(t *testing.T) {
+	t.Run("error mapping", func(t *testing.T) {
+		got := fromUpstreamError(fmt.Errorf("attempt 1: %w", executor.ErrNoTargetAccepted))
+		want := &Error{Status: http.StatusServiceUnavailable, Code: CodeOverloaded, Message: executor.ErrNoTargetAccepted.Error(), RetryAfter: time.Second}
+		if *got != *want {
+			t.Errorf("fromUpstreamError() = %+v, want %+v", *got, *want)
+		}
+	})
+
+	// The router does not look at breakers here, so it picks m-strong and the
+	// executor finds its breaker open: no model accepts the request.
+	for _, tc := range []struct{ name, body string }{
+		{"json", okBody},
+		{"stream", streamBody},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			strong := &stubProvider{
+				complete: replyWith("hi"),
+				stream: func(context.Context, provider.Request) (provider.Stream, error) {
+					return &stubStream{events: []provider.StreamEvent{{Delta: "hi"}}}, nil
+				},
+			}
+			breakers := reliability.NewBreakers(reliability.BreakerConfig{
+				ConsecutiveFailures: 1, ErrorRate: 1, MinRequests: 1000, Window: time.Minute, OpenFor: time.Hour, HalfOpenProbes: 1,
+			}, nil)
+			ticket, ok := breakers.Allow("m-strong")
+			if !ok {
+				t.Fatal("a new breaker refused a request")
+			}
+			ticket.Done(false)
+			if !breakers.IsOpen("m-strong") {
+				t.Fatal("the breaker did not open")
+			}
+
+			srv := newServer(t, testConfig(), map[string]provider.Provider{"p-strong": strong}, func(o *Options) {
+				o.Executor = executor.NewWithOptions(executor.Options{
+					Targets:     map[string]executor.Target{"m-strong": {Model: "m-strong", Upstream: "up-strong", Provider: strong}},
+					Breakers:    breakers,
+					MaxAttempts: 3,
+				})
+			})
+			rec := do(t, srv.Handler(), http.MethodPost, "/v1/chat/completions", keyA, tc.body, nil)
+			wantError(t, rec, http.StatusServiceUnavailable, CodeOverloaded)
+			if got := rec.Header().Get("Retry-After"); got != "1" {
+				t.Errorf("Retry-After = %q, want 1", got)
+			}
+			if got := strong.callCount(); got != 0 {
+				t.Errorf("provider saw %d calls, want 0", got)
 			}
 		})
 	}
