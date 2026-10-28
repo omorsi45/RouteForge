@@ -17,7 +17,7 @@ var (
 )
 
 var (
-	providerTypes   = []string{"openai", "anthropic", "fake"}
+	providerTypes   = []string{"openai", "anthropic", "fake", "replay"}
 	maxTokensParams = []string{"max_completion_tokens", "max_tokens"}
 )
 
@@ -90,7 +90,7 @@ func (c *Config) validateProviders(add addFunc) {
 			continue
 		}
 
-		if p.Type != "fake" {
+		if p.Type != "fake" && p.Type != "replay" {
 			if u, err := url.Parse(p.BaseURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 				add(base+".base_url", "must be an absolute http or https URL")
 			}
@@ -107,6 +107,23 @@ func (c *Config) validateProviders(add addFunc) {
 		if p.Type == "fake" {
 			validateFake(base+".fake", p.Fake, add)
 		}
+		if p.Type == "replay" {
+			validateReplay(base+".replay", p.Replay, add)
+		}
+	}
+}
+
+// validateReplay checks that the replay paths are set. It never reads them: the
+// records file is large third-party data that a checkout does not carry.
+func validateReplay(base string, r Replay, add addFunc) {
+	if r.File == "" {
+		add(base+".file", "required for replay")
+	}
+	if r.LatencyProfiles == "" {
+		add(base+".latency_profiles", "required for replay")
+	}
+	if !(r.TimeScale > 0 && r.TimeScale <= 1) {
+		add(base+".time_scale", "must be in (0, 1]")
 	}
 }
 

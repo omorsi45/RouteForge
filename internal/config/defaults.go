@@ -6,6 +6,10 @@ import (
 	"github.com/omorsi45/routeforge/internal/provider"
 )
 
+// defaultReplaySeed is the replay jitter seed, the seed of
+// bench/latency_profiles.yaml.
+const defaultReplaySeed = 20261026
+
 // ApplyDefaults fills every unset field with its documented default. Zero
 // values mean "unset", so it never overrides an explicit setting.
 func (c *Config) ApplyDefaults() {
@@ -80,6 +84,14 @@ func (c *Config) ApplyDefaults() {
 			}
 			if f.DisconnectAfter == 0 {
 				f.DisconnectAfter = 1
+			}
+		case "replay":
+			r := &p.Replay
+			if r.TimeScale == 0 {
+				r.TimeScale = 1
+			}
+			if r.Seed == 0 {
+				r.Seed = defaultReplaySeed
 			}
 		}
 	}

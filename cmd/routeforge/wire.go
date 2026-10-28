@@ -15,6 +15,7 @@ import (
 	"github.com/omorsi45/routeforge/internal/provider/anthropic"
 	"github.com/omorsi45/routeforge/internal/provider/fake"
 	"github.com/omorsi45/routeforge/internal/provider/openai"
+	"github.com/omorsi45/routeforge/internal/provider/replay"
 )
 
 // startupActor is recorded as the actor of the activation at startup.
@@ -92,6 +93,12 @@ func buildProviders(cfg *config.Config, getenv func(string) string, client *http
 			})
 		case "fake":
 			out[p.Name] = fake.New(p.Name, p.Fake)
+		case "replay":
+			rp, err := replay.LoadFile(p.Name, p.Replay.File, p.Replay.LatencyProfiles, p.Replay.TimeScale, p.Replay.Seed)
+			if err != nil {
+				return nil, fmt.Errorf("provider %q: %w", p.Name, err)
+			}
+			out[p.Name] = rp
 		default:
 			return nil, fmt.Errorf("provider %q: unsupported type %q", p.Name, p.Type)
 		}

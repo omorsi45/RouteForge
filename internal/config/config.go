@@ -101,6 +101,17 @@ type Provider struct {
 	APIKeyEnv      string `yaml:"api_key_env"`
 	MaxTokensParam string `yaml:"max_tokens_param"`
 	Fake           Fake   `yaml:"fake"`
+	Replay         Replay `yaml:"replay"`
+}
+
+// Replay configures the replay provider, which serves recorded outputs with
+// simulated latency. File and LatencyProfiles resolve against the directory of
+// the configuration file; neither is read until the provider is built.
+type Replay struct {
+	File            string  `yaml:"file"`
+	LatencyProfiles string  `yaml:"latency_profiles"`
+	TimeScale       float64 `yaml:"time_scale"` // multiplies simulated latency, in (0, 1]
+	Seed            uint64  `yaml:"seed"`       // seeds the latency jitter
 }
 
 // Fake configures the deterministic fake provider.
@@ -171,8 +182,9 @@ func Parse(data []byte) (*Config, error) {
 }
 
 // Load reads and parses the configuration file at path. Relative file paths
-// in the configuration (policy.path, pricing.file) resolve against the
-// directory of the file and are stored absolute.
+// in the configuration (policy.path, pricing.file and each replay provider's
+// file and latency_profiles) resolve against the directory of the file and
+// are stored absolute.
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -189,6 +201,11 @@ func Load(path string) (*Config, error) {
 	c.Dir = filepath.Dir(abs)
 	c.Policy.Path = c.ResolvePath(c.Policy.Path)
 	c.Pricing.File = c.ResolvePath(c.Pricing.File)
+	for i := range c.Providers {
+		r := &c.Providers[i].Replay
+		r.File = c.ResolvePath(r.File)
+		r.LatencyProfiles = c.ResolvePath(r.LatencyProfiles)
+	}
 	return c, nil
 }
 

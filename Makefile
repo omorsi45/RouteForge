@@ -1,6 +1,6 @@
 GO ?= go
 GOVULNCHECK_VERSION := v1.9.0
-EXAMPLE_CONFIGS := $(wildcard deploy/configs/*.yaml)
+EXAMPLE_CONFIGS := $(wildcard deploy/configs/*.yaml bench/configs/*.yaml)
 PYTHON ?= python3
 VENV := trainer/.venv
 VPY := $(VENV)/bin/python

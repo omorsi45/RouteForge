@@ -3,22 +3,29 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/omorsi45/routeforge/internal/auth"
 	"github.com/omorsi45/routeforge/internal/config"
+	"github.com/omorsi45/routeforge/internal/policy"
 	"github.com/omorsi45/routeforge/internal/provider"
 	"github.com/omorsi45/routeforge/internal/provider/anthropic"
 	"github.com/omorsi45/routeforge/internal/provider/fake"
 	"github.com/omorsi45/routeforge/internal/provider/openai"
+	"github.com/omorsi45/routeforge/internal/provider/replay"
 )
 
 const wireConfigYAML = `
@@ -264,6 +271,175 @@ func TestModelPricesErrors(t *testing.T) {
 			t.Fatalf("err = %v, want one naming override", err)
 		}
 	})
+}
+
+const replayProfilesYAML = `simulated: true
+seed: 1
+jitter: 0.1
+models:
+  - {name: m-rp, rank: 0, ttft_ms: 100, decode_tokens_per_s: 100}
+`
+
+const replayGatewayYAML = `
+tenants:
+  - name: tenant-a
+    api_key_sha256:
+      - aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+providers:
+  - name: replay
+    type: replay
+    replay:
+      file: data/test.jsonl
+      latency_profiles: profiles.yaml
+      time_scale: 0.001
+models:
+  - name: m-rp
+    provider: replay
+    input_per_mtok: 1
+    output_per_mtok: 2
+`
+
+func TestBuildProvidersReplay(t *testing.T) {
+	dir := t.TempDir()
+	sum := sha256.Sum256([]byte("hello"))
+	record := fmt.Sprintf(`{"prompt_sha256":%q,"model":"m-rp","prompt_id":"ds:1","dataset":"ds","text":"world","prompt_tokens":3,"completion_tokens":5,"cost_usd":0.1,"score":1.0,"success":true}`+"\n", hex.EncodeToString(sum[:]))
+	writeFile(t, dir, "profiles.yaml", replayProfilesYAML)
+	writeFile(t, dir, "gateway.yaml", replayGatewayYAML)
+
+	// The records file is not there yet: the provider cannot be built.
+	cfg, err := config.Load(filepath.Join(dir, "gateway.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := buildProviders(cfg, func(string) string { return "" }, http.DefaultClient); err == nil || !strings.Contains(err.Error(), `provider "replay"`) {
+		t.Fatalf("err = %v, want one naming provider replay", err)
+	}
+
+	if err := os.Mkdir(filepath.Join(dir, "data"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, dir, "data/test.jsonl", record)
+	providers, err := buildProviders(cfg, func(string) string { return "" }, http.DefaultClient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rp, ok := providers["replay"].(*replay.Provider)
+	if !ok {
+		t.Fatalf("replay is %T, want *replay.Provider", providers["replay"])
+	}
+	resp, err := rp.Complete(context.Background(), provider.Request{
+		Model:     "m-rp",
+		MaxTokens: 10,
+		Messages:  []provider.Message{{Role: provider.RoleUser, Content: "hello"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Content != "world" || resp.Usage == nil || *resp.Usage != (provider.Usage{PromptTokens: 3, CompletionTokens: 5}) {
+		t.Fatalf("resp = %+v", resp)
+	}
+}
+
+func TestValidateConfigDoesNotRequireReplayFile(t *testing.T) {
+	// Neither the records file (gitignored third-party data) nor the profile
+	// file exists; validate-config only checks that the paths are set.
+	dir := t.TempDir()
+	cfg := writeFile(t, dir, "gateway.yaml", replayGatewayYAML)
+	code, out, errs := runCmd("validate-config", "--config", cfg)
+	if code != 0 {
+		t.Fatalf("exit %d, stderr %q", code, errs)
+	}
+	if out != "config OK: 1 tenants, 1 providers, 1 models\n" {
+		t.Fatalf("stdout = %q", out)
+	}
+}
+
+func TestReplayBenchConfig(t *testing.T) {
+	c, err := config.Load("../../bench/configs/replay.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pol, err := policy.LoadFile("../../trainer/artifacts/policy.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	profiles, err := replay.LoadProfiles("../../bench/latency_profiles.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var limits struct {
+		MaxOutputTokens int `json:"max_output_tokens"`
+	}
+	if err := json.Unmarshal([]byte(mustRead(t, "../../bench/limits.json")), &limits); err != nil {
+		t.Fatal(err)
+	}
+	abs := func(p string) string {
+		a, err := filepath.Abs(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return a
+	}
+
+	if c.Server.DefaultDeadline != 10*time.Minute {
+		t.Errorf("DefaultDeadline = %v, want 10m", c.Server.DefaultDeadline)
+	}
+	if c.Policy.Path != abs("../../trainer/artifacts/policy.json") || c.Pricing.File != abs("../../deploy/prices.yaml") {
+		t.Errorf("Policy.Path, Pricing.File = %q, %q", c.Policy.Path, c.Pricing.File)
+	}
+
+	if len(c.Tenants) != 1 {
+		t.Fatalf("got %d tenants, want 1", len(c.Tenants))
+	}
+	ten := c.Tenants[0]
+	if ten.Name != "bench" || !ten.AllowStrategyOverride || ten.MaxDeadline != 10*time.Minute || ten.MaxOutputTokens != limits.MaxOutputTokens {
+		t.Errorf("tenant = %+v, want bench with override, 10m deadline and %d output tokens", ten, limits.MaxOutputTokens)
+	}
+	if got, ok := auth.NewStore(c.Tenants).Lookup("test-key-bench"); !ok || got.Name != "bench" {
+		t.Errorf("Lookup(test-key-bench) = %v, %v", got, ok)
+	}
+
+	if len(c.Providers) != 1 {
+		t.Fatalf("got %d providers, want 1", len(c.Providers))
+	}
+	p := c.Providers[0]
+	if p.Name != "replay" || p.Type != "replay" || p.Replay.TimeScale != 0.01 {
+		t.Errorf("provider = %+v", p)
+	}
+	if p.Replay.File != abs("../../trainer/artifacts/replay/test.jsonl") || p.Replay.LatencyProfiles != abs("../../bench/latency_profiles.yaml") {
+		t.Errorf("replay files = %q, %q", p.Replay.File, p.Replay.LatencyProfiles)
+	}
+
+	if len(c.Models) != len(pol.Models) {
+		t.Fatalf("got %d models, want %d", len(c.Models), len(pol.Models))
+	}
+	for i, pm := range pol.Models {
+		m := c.Models[i]
+		if m.Name != pm.Name || m.PolicyName != pm.Name || m.UpstreamModel != pm.Name || m.Provider != "replay" {
+			t.Errorf("models[%d] = %q / %q / %q on %q, want %q on replay", i, m.Name, m.PolicyName, m.UpstreamModel, m.Provider, pm.Name)
+		}
+		if m.Strongest != (pm.Name == pol.Strongest) {
+			t.Errorf("%s: strongest = %v, policy strongest model is %s", pm.Name, m.Strongest, pol.Strongest)
+		}
+		prof, ok := profiles[pm.Name]
+		if !ok {
+			t.Fatalf("%s: no latency profile", pm.Name)
+		}
+		if want := (config.LatencyPrior{TTFTMS: prof.TTFTMS, DecodeTokensPerS: prof.DecodeTokensPerS, Jitter: prof.Jitter}); m.LatencyPrior != want {
+			t.Errorf("%s: latency_prior = %+v, want %+v", pm.Name, m.LatencyPrior, want)
+		}
+		if m.InputPerMTok != nil || m.OutputPerMTok != nil {
+			t.Errorf("%s: explicit prices set, want prices from the price file", pm.Name)
+		}
+	}
+
+	code, out, errs := runCmd("validate-config", "--config", "../../bench/configs/replay.yaml")
+	if code != 0 {
+		t.Fatalf("validate-config exit %d, stderr %q", code, errs)
+	}
+	if want := "config OK: 1 tenants, 1 providers, 6 models, policy " + pol.Version + "\n"; out != want {
+		t.Fatalf("stdout = %q, want %q", out, want)
+	}
 }
 
 func TestServeRequiresConfigFlag(t *testing.T) {

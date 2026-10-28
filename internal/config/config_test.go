@@ -284,6 +284,86 @@ func TestConfigResolvesRelativePathsFromRelativeConfig(t *testing.T) {
 	}
 }
 
+const replayDoc = `
+tenants:
+  - name: tenant-a
+    api_key_sha256:
+      - aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+providers:
+  - name: replay
+    type: replay
+    replay:
+      file: data/test.jsonl
+      latency_profiles: ../profiles.yaml
+models:
+  - name: m-a
+    provider: replay
+`
+
+func TestReplayProviderDefaults(t *testing.T) {
+	c, err := config.Parse([]byte(replayDoc))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	r := c.Providers[0].Replay
+	if r.TimeScale != 1 || r.Seed != 20261026 {
+		t.Errorf("TimeScale, Seed = %v, %v; want 1, 20261026", r.TimeScale, r.Seed)
+	}
+
+	doc := strings.Replace(replayDoc, "      latency_profiles:", "      time_scale: 0.01\n      seed: 42\n      latency_profiles:", 1)
+	c, err = config.Parse([]byte(doc))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if r := c.Providers[0].Replay; r.TimeScale != 0.01 || r.Seed != 42 {
+		t.Errorf("TimeScale, Seed = %v, %v; want 0.01, 42", r.TimeScale, r.Seed)
+	}
+}
+
+func TestReplayPathsResolveAgainstConfigDir(t *testing.T) {
+	root := t.TempDir()
+	sub := filepath.Join(root, "sub")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	abs := filepath.ToSlash(filepath.Join(root, "elsewhere", "test.jsonl"))
+	doc := strings.Replace(replayDoc, "data/test.jsonl", abs, 1)
+	path := filepath.Join(sub, "c.yaml")
+	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Neither file exists: loading a config never reads them.
+	c, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	r := c.Providers[0].Replay
+	if r.File != abs {
+		t.Errorf("File = %q, want the absolute path %q unchanged", r.File, abs)
+	}
+	if want := filepath.Join(root, "profiles.yaml"); r.LatencyProfiles != want {
+		t.Errorf("LatencyProfiles = %q, want %q", r.LatencyProfiles, want)
+	}
+
+	c, err = config.Load(writeAt(t, sub, "rel.yaml", replayDoc))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if want := filepath.Join(sub, "data", "test.jsonl"); c.Providers[0].Replay.File != want {
+		t.Errorf("File = %q, want %q", c.Providers[0].Replay.File, want)
+	}
+}
+
+func writeAt(t *testing.T, dir, name, body string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func TestResolvePath(t *testing.T) {
 	dir := t.TempDir()
 	c := &config.Config{Dir: dir}

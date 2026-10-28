@@ -1,0 +1,55 @@
+# Replay benchmark gateway. Serves the trained routing policy over recorded
+# model outputs: every request is answered from trainer/artifacts/replay/test.jsonl
+# after a simulated delay. Latency numbers come from bench/latency_profiles.yaml
+# and are synthetic, not measurements of any provider. time_scale shrinks the
+# delays so a full replay finishes quickly; the price file sets the model prices.
+# Relative paths resolve against the directory of this file. The records file is
+# third-party data that is not committed, and validate-config does not read it.
+server:
+  default_deadline: 10m
+
+tenants:
+  - name: bench
+    # test-key-bench is a public benchmark key for loopback runs only. Never
+    # expose a gateway that accepts it.
+    api_key_sha256:
+      - 7c0c7e4891f7e2af5ed802eda1f4c03bbeaeddaf2cc920c8b74275b1e30268aa
+    allow_strategy_override: true
+    # max_output_tokens from bench/limits.json (the largest per-model maximum).
+    max_output_tokens: 68462
+    max_deadline: 10m
+
+policy:
+  path: ../../trainer/artifacts/policy.json
+
+pricing:
+  file: ../../deploy/prices.yaml
+
+providers:
+  - name: replay
+    type: replay
+    replay:
+      file: ../../trainer/artifacts/replay/test.jsonl
+      latency_profiles: ../latency_profiles.yaml
+      time_scale: 0.01
+
+models:
+  - name: gpt-5
+    provider: replay
+    latency_prior: {ttft_ms: 600, decode_tokens_per_s: 60, jitter: 0.1}
+  - name: claude-sonnet-4
+    provider: replay
+    latency_prior: {ttft_ms: 700, decode_tokens_per_s: 45, jitter: 0.1}
+  - name: gemini-2.5-pro
+    provider: replay
+    strongest: true
+    latency_prior: {ttft_ms: 500, decode_tokens_per_s: 75, jitter: 0.1}
+  - name: gemini-2.5-flash
+    provider: replay
+    latency_prior: {ttft_ms: 400, decode_tokens_per_s: 90, jitter: 0.1}
+  - name: deepseek-v3.1-terminus
+    provider: replay
+    latency_prior: {ttft_ms: 300, decode_tokens_per_s: 105, jitter: 0.1}
+  - name: qwen3-235b-a22b-2507
+    provider: replay
+    latency_prior: {ttft_ms: 200, decode_tokens_per_s: 120, jitter: 0.1}

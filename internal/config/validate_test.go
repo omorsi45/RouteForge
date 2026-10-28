@@ -181,6 +181,65 @@ func TestValidateModelPricePair(t *testing.T) {
 	}
 }
 
+func TestValidateReplayProvider(t *testing.T) {
+	withReplay := func(c *config.Config, mutate func(*config.Replay)) {
+		c.Providers[0] = config.Provider{
+			Name: "replay",
+			Type: "replay",
+			Replay: config.Replay{
+				File:            "test.jsonl",
+				LatencyProfiles: "profiles.yaml",
+				TimeScale:       0.01,
+				Seed:            1,
+			},
+		}
+		if mutate != nil {
+			mutate(&c.Providers[0].Replay)
+		}
+		for i := range c.Models {
+			c.Models[i].Provider = "replay"
+		}
+	}
+
+	t.Run("accepted without a base url or key", func(t *testing.T) {
+		c := valid(t)
+		withReplay(c, nil)
+		if err := c.Validate(); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+	})
+	t.Run("time scale of one is accepted", func(t *testing.T) {
+		c := valid(t)
+		withReplay(c, func(r *config.Replay) { r.TimeScale = 1 })
+		if err := c.Validate(); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+	})
+
+	rejects := []struct {
+		name   string
+		mutate func(*config.Replay)
+		want   string
+	}{
+		{"zero time scale", func(r *config.Replay) { r.TimeScale = 0 }, "providers[0].replay.time_scale: must be in (0, 1]"},
+		{"negative time scale", func(r *config.Replay) { r.TimeScale = -0.5 }, "providers[0].replay.time_scale: must be in (0, 1]"},
+		{"time scale above one", func(r *config.Replay) { r.TimeScale = 1.01 }, "providers[0].replay.time_scale: must be in (0, 1]"},
+		{"nan time scale", func(r *config.Replay) { r.TimeScale = math.NaN() }, "providers[0].replay.time_scale: must be in (0, 1]"},
+		{"no file", func(r *config.Replay) { r.File = "" }, "providers[0].replay.file: required for replay"},
+		{"no latency profiles", func(r *config.Replay) { r.LatencyProfiles = "" }, "providers[0].replay.latency_profiles: required for replay"},
+	}
+	for _, tc := range rejects {
+		t.Run(tc.name, func(t *testing.T) {
+			c := valid(t)
+			withReplay(c, tc.mutate)
+			err := c.Validate()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Validate = %v, want an error containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestValidateJoinsAllErrors(t *testing.T) {
 	c := valid(t)
 	c.Tenants[0].Profile = "fast"
