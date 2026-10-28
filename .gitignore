@@ -22,6 +22,9 @@ __pycache__/
 /data/work/
 /trainer/artifacts/replay/
 
+# Raw benchmark output such as gateway logs; the result files beside it are committed
+/bench/results/*/raw/
+
 # Local environment and secrets
 .env
 .env.*

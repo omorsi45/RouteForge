@@ -7,7 +7,7 @@ VPY := $(VENV)/bin/python
 TRAIN := OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONPATH=trainer $(VPY) -m routeforge_train --root .
 EXTRACTION_MODELS ?=
 
-.PHONY: check fmt-check vet build tidy-check validate-configs test test-race test-integration vuln py-setup py-check py-test data train evaluate label-extraction
+.PHONY: check fmt-check vet build tidy-check validate-configs test test-race test-integration vuln py-setup py-check py-test data train evaluate label-extraction build-bench bench-replay
 
 check: fmt-check vet build tidy-check validate-configs
 
@@ -61,3 +61,11 @@ evaluate:
 label-extraction:
 	@test -n "$(EXTRACTION_MODELS)" || { echo "set EXTRACTION_MODELS, for example: make label-extraction EXTRACTION_MODELS=llama3.2:3b"; exit 2; }
 	$(TRAIN) label-extraction --models "$(EXTRACTION_MODELS)"
+
+build-bench:
+	$(GO) build -o bin/routeforge ./cmd/routeforge
+	$(GO) build -o bin/routeforge-bench ./cmd/routeforge-bench
+
+bench-replay:
+	@test -n "$(RUN_ID)" || { echo "set RUN_ID, for example: make bench-replay RUN_ID=2026-10-28-replay"; exit 2; }
+	bash scripts/bench.sh replay "$(RUN_ID)"
