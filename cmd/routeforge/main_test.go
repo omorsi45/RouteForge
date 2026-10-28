@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"runtime"
 	"strings"
@@ -52,5 +53,29 @@ func TestHelpExits0(t *testing.T) {
 		if !strings.Contains(out.String(), c) {
 			t.Fatalf("usage missing %q", c)
 		}
+	}
+}
+
+// TestHelpFlagsPrintUsageToStdout checks that the flags every command line
+// tool answers to behave like the help command: the usage on stdout, nothing
+// on stderr, exit 0.
+func TestHelpFlagsPrintUsageToStdout(t *testing.T) {
+	var want bytes.Buffer
+	if code := run(context.Background(), []string{"help"}, &want, io.Discard, os.Getenv); code != 0 {
+		t.Fatalf("help: exit %d", code)
+	}
+	for _, flag := range []string{"-h", "--help", "-help"} {
+		t.Run(flag, func(t *testing.T) {
+			var out, errb bytes.Buffer
+			if code := run(context.Background(), []string{flag}, &out, &errb, os.Getenv); code != 0 {
+				t.Fatalf("exit %d, stderr %q", code, errb.String())
+			}
+			if out.String() != want.String() {
+				t.Errorf("stdout = %q, want the usage text %q", out.String(), want.String())
+			}
+			if errb.Len() != 0 {
+				t.Errorf("stderr = %q, want nothing", errb.String())
+			}
+		})
 	}
 }

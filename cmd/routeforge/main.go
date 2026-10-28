@@ -50,10 +50,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, getenv fu
 	case "validate-config":
 		return cmdValidateConfig(args[1:], stdout, stderr)
 	case "keygen":
-		return cmdKeygen(stdout, rand.Reader)
+		return cmdKeygen(stdout, stderr, rand.Reader)
 	case "healthcheck":
 		return cmdHealthcheck(ctx, args[1:], stdout, stderr)
-	case "help":
+	case "help", "-h", "--help", "-help":
 		fmt.Fprint(stdout, usageText)
 		return 0
 	default:
