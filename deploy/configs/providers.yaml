@@ -1,0 +1,42 @@
+# Example with real providers. Credentials come only from the named environment variables.
+# Generate a key and its digest with: routeforge keygen
+tenants:
+  - name: demo
+    # This digest matches no key, so the example authenticates nobody until you
+    # replace it with the digest printed by `routeforge keygen`. The public demo key
+    # in fake.yaml must never be used with real provider credentials.
+    api_key_sha256:
+      - 0000000000000000000000000000000000000000000000000000000000000000
+    allow_strategy_override: true
+
+providers:
+  - name: openai
+    type: openai
+    api_key_env: OPENAI_API_KEY
+  - name: anthropic
+    type: anthropic
+    api_key_env: ANTHROPIC_API_KEY
+  - name: ollama
+    type: openai
+    base_url: http://localhost:11434/v1
+    max_tokens_param: max_tokens
+
+models:
+  # Prices are USD per 1M tokens: gpt-5 and claude-sonnet-4 are copied from
+  # deploy/prices.yaml, and the local llama3.2 model is free.
+  - name: gpt-5
+    provider: openai
+    upstream_model: gpt-5
+    strongest: true
+    input_per_mtok: 1.25
+    output_per_mtok: 10.0
+  - name: claude-sonnet-4
+    provider: anthropic
+    upstream_model: claude-sonnet-4-20250514
+    input_per_mtok: 3.0
+    output_per_mtok: 15.0
+  - name: llama3.2
+    provider: ollama
+    upstream_model: llama3.2
+    input_per_mtok: 0
+    output_per_mtok: 0

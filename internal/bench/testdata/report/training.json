@@ -1,0 +1,10 @@
+{
+  "data": {
+    "pool": [
+      "model-a",
+      "model-b",
+      "model-c"
+    ]
+  },
+  "schema_version": 1
+}

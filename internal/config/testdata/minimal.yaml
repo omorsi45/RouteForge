@@ -1,0 +1,13 @@
+tenants:
+  - name: tenant-a
+    api_key_sha256:
+      - aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+providers:
+  - name: fake
+    type: fake
+models:
+  - name: m-fast
+    provider: fake
+  - name: m-strong
+    provider: fake
+    strongest: true

@@ -1,0 +1,93 @@
+GO ?= go
+GOVULNCHECK_VERSION := v1.9.0
+EXAMPLE_CONFIGS := $(wildcard deploy/configs/*.yaml bench/configs/*.yaml)
+PYTHON ?= python3
+VENV := trainer/.venv
+VPY := $(VENV)/bin/python
+TRAIN := OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONPATH=trainer $(VPY) -m routeforge_train --root .
+EXTRACTION_MODELS ?=
+
+.PHONY: check fmt-check vet build tidy-check validate-configs test test-race test-integration docker compose-smoke vuln py-setup py-check py-test data train evaluate label-extraction build-bench bench-replay bench-load bench-faults report demo
+
+check: fmt-check vet build tidy-check validate-configs
+
+fmt-check:
+	@out="$$(gofmt -l .)"; if [ -n "$$out" ]; then echo "gofmt needed:"; echo "$$out"; exit 1; fi
+
+vet:
+	$(GO) vet ./...
+
+build:
+	$(GO) build ./...
+
+tidy-check:
+	$(GO) mod tidy -diff
+
+validate-configs:
+	@for f in $(EXAMPLE_CONFIGS); do $(GO) run ./cmd/routeforge validate-config --config $$f || exit 1; done
+
+test:
+	$(GO) test -count=1 ./...
+
+test-race:
+	$(GO) test -race -count=1 ./...
+
+test-integration:
+	$(GO) test -tags integration -count=1 ./...
+
+docker:
+	docker build -f deploy/Dockerfile --build-arg VERSION=$$(git describe --always --dirty) -t routeforge:local .
+
+compose-smoke:
+	bash scripts/compose-smoke.sh
+
+vuln:
+	$(GO) run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
+
+py-setup:
+	$(PYTHON) -m venv $(VENV)
+	$(VPY) -m pip install --disable-pip-version-check --no-deps -r trainer/requirements.txt -r trainer/requirements-dev.txt
+	$(VPY) -m pip check
+
+py-check:
+	cd trainer && .venv/bin/ruff check . && .venv/bin/ruff format --check .
+
+py-test:
+	cd trainer && OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python -m pytest
+
+data:
+	$(TRAIN) data
+
+train:
+	$(TRAIN) train
+
+evaluate:
+	$(TRAIN) evaluate
+
+label-extraction:
+	@test -n "$(EXTRACTION_MODELS)" || { echo "set EXTRACTION_MODELS, for example: make label-extraction EXTRACTION_MODELS=llama3.2:3b"; exit 2; }
+	$(TRAIN) label-extraction --models "$(EXTRACTION_MODELS)"
+
+build-bench:
+	$(GO) build -o bin/routeforge ./cmd/routeforge
+	$(GO) build -o bin/routeforge-bench ./cmd/routeforge-bench
+
+bench-replay:
+	@test -n "$(RUN_ID)" || { echo "set RUN_ID, for example: make bench-replay RUN_ID=2026-10-28-replay"; exit 2; }
+	bash scripts/bench.sh replay "$(RUN_ID)"
+
+bench-load:
+	@test -n "$(RUN_ID)" || { echo "set RUN_ID, for example: make bench-load RUN_ID=2026-10-28-load"; exit 2; }
+	bash scripts/bench.sh load "$(RUN_ID)"
+
+bench-faults:
+	@test -n "$(RUN_ID)" || { echo "set RUN_ID, for example: make bench-faults RUN_ID=2026-10-28-faults"; exit 2; }
+	bash scripts/bench.sh faults "$(RUN_ID)"
+
+report:
+	@test -n "$(RUN_ID)" || { echo "set RUN_ID, for example: make report RUN_ID=2026-10-28-report"; exit 2; }
+	$(GO) build -o bin/routeforge-bench ./cmd/routeforge-bench
+	bin/routeforge-bench report --root . --run-id "$(RUN_ID)" --out docs/benchmarks.md --readme README.md
+
+demo:
+	bash scripts/demo.sh

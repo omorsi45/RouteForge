@@ -1,0 +1,168 @@
+{
+  "created_at": "2026-01-01T00:00:00Z",
+  "h1": {
+    "cps_reduction_vs_strongest": {
+      "ci_high": 0.25,
+      "ci_low": 0.15,
+      "estimate": 0.2
+    },
+    "falsified": true,
+    "falsified_by": [
+      "static_oracle_family"
+    ],
+    "lodo_gains_disappear": false,
+    "lodo_pooled_reduction": {
+      "ci_high": 0.14,
+      "ci_low": 0.06,
+      "estimate": 0.1
+    },
+    "predictor": "lr",
+    "profile": "balanced",
+    "regret": {
+      "alpha": 0.1,
+      "ci_high": 0.099,
+      "ci_low": 0.011,
+      "count": 4,
+      "n": 100,
+      "rate": 0.04
+    },
+    "regret_exceeds_alpha_beyond_ci": false,
+    "target": 0.25,
+    "target_met": false,
+    "vs_share_matched_random": {
+      "beats": true,
+      "cost_per_success_diff": {
+        "ci_high": -0.005,
+        "ci_low": -0.02,
+        "estimate": -0.01
+      }
+    },
+    "vs_static_oracle_family": {
+      "beats": false,
+      "cost_per_success_diff": {
+        "ci_high": 0.015,
+        "ci_low": -0.005,
+        "estimate": 0.005
+      }
+    }
+  },
+  "lodo": {
+    "pooled": {
+      "ci_high": 0.14,
+      "ci_low": 0.06,
+      "degenerate_resamples": 0,
+      "estimate": 0.1,
+      "n": 600,
+      "n_resamples": 1000
+    }
+  },
+  "notes": [
+    "Guarantee note text.",
+    "Template note text.",
+    "Latency note text.",
+    "Cost note text."
+  ],
+  "policy_version": "pol-test-1",
+  "schema_version": 1,
+  "served_predictor": "lr",
+  "strategies": {
+    "always_cheapest": {
+      "accuracy": 0.5,
+      "cost_per_success_usd": 0.01,
+      "n": 100,
+      "regret_rate": 0.4,
+      "shares": {
+        "model-a": 1,
+        "model-b": 0,
+        "model-c": 0
+      },
+      "total_cost_usd": 0.5
+    },
+    "always_strongest": {
+      "accuracy": 0.8,
+      "cost_per_success_usd": 0.1,
+      "n": 100,
+      "regret_rate": 0,
+      "shares": {
+        "model-a": 0,
+        "model-b": 0,
+        "model-c": 1
+      },
+      "total_cost_usd": 8
+    },
+    "latency": {
+      "accuracy": 0.55,
+      "cost_per_success_usd": 0.04,
+      "n": 100,
+      "regret_rate": 0.3,
+      "shares": {
+        "model-a": 0.4,
+        "model-b": 0.4,
+        "model-c": 0.2
+      },
+      "total_cost_usd": 2.2
+    },
+    "oracle": {
+      "accuracy": 0.9,
+      "cost_per_success_usd": 0.03,
+      "n": 100,
+      "regret_rate": 0,
+      "shares": {
+        "model-a": 0.5,
+        "model-b": 0.3,
+        "model-c": 0.2
+      },
+      "total_cost_usd": 2.7
+    },
+    "quality/lr/balanced": {
+      "accuracy": 0.75,
+      "cost_per_success_usd": 0.08,
+      "escalation_rate": 0.1,
+      "lambda": 0.5,
+      "n": 100,
+      "regret_rate": 0.04,
+      "shares": {
+        "model-a": 0.2,
+        "model-b": 0.3,
+        "model-c": 0.5
+      },
+      "total_cost_usd": 6
+    },
+    "share_matched_random/balanced": {
+      "accuracy": 0.65,
+      "cost_per_success_usd": 0.09,
+      "n": 100,
+      "regret_rate": 0.15,
+      "shares": {
+        "model-a": 0.3,
+        "model-b": 0.3,
+        "model-c": 0.4
+      },
+      "total_cost_usd": 5.85
+    },
+    "static_keyword": {
+      "accuracy": 0.6,
+      "cost_per_success_usd": 0.05,
+      "n": 100,
+      "regret_rate": 0.2,
+      "shares": {
+        "model-a": 0.5,
+        "model-b": 0.25,
+        "model-c": 0.25
+      },
+      "total_cost_usd": 3
+    },
+    "static_oracle_family": {
+      "accuracy": 0.7,
+      "cost_per_success_usd": 0.075,
+      "n": 100,
+      "regret_rate": 0.1,
+      "shares": {
+        "model-a": 0.25,
+        "model-b": 0.5,
+        "model-c": 0.25
+      },
+      "total_cost_usd": 5.25
+    }
+  }
+}

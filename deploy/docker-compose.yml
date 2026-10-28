@@ -1,0 +1,66 @@
+# Local stack: the gateway with PostgreSQL, Redis and Prometheus.
+#
+#   docker compose -f deploy/docker-compose.yml up -d --build --wait
+#
+# For the local stack only. The password below is a placeholder for a throwaway
+# database that is not published outside this network; the demo API key is
+# public, and /metrics has no authentication, so the published ports are bound
+# to the loopback interface. Do not reuse any of this value in a shared setup.
+name: routeforge
+
+services:
+  routeforge:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      ROUTEFORGE_POSTGRES_DSN: postgres://routeforge:routeforge-local-only@postgres:5432/routeforge?sslmode=disable
+      ROUTEFORGE_REDIS_URL: redis://redis:6379/0
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:17.11@sha256:31ba9c94a03ada9988f2bb493a22a75eef3a185884533e5cdbcd498ea835b08f
+    environment:
+      POSTGRES_USER: routeforge
+      POSTGRES_PASSWORD: routeforge-local-only
+      POSTGRES_DB: routeforge
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U routeforge -d routeforge"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7.4.12@sha256:b6b6e3dc0c0952737748e55d5d885272840c7e42ba41ab1d5489f693419882f5
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  prometheus:
+    image: prom/prometheus:v3.15.0@sha256:efd719c99d83b060d9daefdcf00360461adf279f45ef5391f8d111892118753e
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "127.0.0.1:9090:9090"
+    depends_on:
+      - routeforge
+
+volumes:
+  postgres-data:
+  redis-data:

@@ -1,0 +1,35 @@
+# Local demo only. Clients send the bearer value rf_local_demo_only. Generate real keys with: routeforge keygen
+tenants:
+  - name: demo
+    api_key_sha256:
+      - 886ec24d8618d51171c94b1352ac7b95b4e82b97a5d2bff15045161351caa052
+    allow_strategy_override: true
+
+providers:
+  - name: fake-fast
+    type: fake
+    fake:
+      seed: 1
+      ttft: 50ms
+      per_token: 5ms
+      jitter: 0.1
+  - name: fake-strong
+    type: fake
+    fake:
+      seed: 2
+      ttft: 200ms
+      per_token: 15ms
+      jitter: 0.1
+
+models:
+  # Prices are USD per 1M tokens. These models have explicit prices, so this
+  # config needs no price file.
+  - name: fake-fast
+    provider: fake-fast
+    input_per_mtok: 0.1
+    output_per_mtok: 0.4
+  - name: fake-strong
+    provider: fake-strong
+    strongest: true
+    input_per_mtok: 1.0
+    output_per_mtok: 4.0

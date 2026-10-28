@@ -1,0 +1,158 @@
+{
+  "config_path": "bench/configs/replay.yaml",
+  "created_at": "2026-10-28T17:33:50Z",
+  "env": {
+    "config_sha256": "c282b8353eac3477bca5da5d02ea2f500632a625d9d6e2bdd86865ee367db2ed",
+    "cpu_model": "AMD Ryzen 9 7900X 12-Core Processor",
+    "cpus": 24,
+    "dataset_revision": "0e5af1b84bf73437a01a1849c0f1d2468baa93fc",
+    "git_sha": "436b478f6143844eab3980ddda6d0d7b40886c43",
+    "go_version": "go1.27.3",
+    "kernel": "6.18.33.2-microsoft-standard-WSL2",
+    "os": "linux (Ubuntu 24.04.4 LTS)",
+    "policy_version": "7ae71d0e6deb",
+    "python_version": "3.14.10",
+    "ram_bytes": 16321802240
+  },
+  "kind": "replay",
+  "params": {
+    "base_url": "http://127.0.0.1:18080",
+    "parity_threshold": 0.999,
+    "workers": 16
+  },
+  "results": {
+    "deterministic_agreement": 1,
+    "latency_note": "The gateway's latency strategy adapts its estimates to observed attempts (spec 8.6); the offline latency router uses the SIMULATED priors only, so its agreement is reported but not part of the parity check.",
+    "overall_agreement": 0.9994308480364257,
+    "parity_pass": true,
+    "prompts": 1757,
+    "requests": 12299,
+    "strategies": {
+      "cheapest": {
+        "accuracy": 0.5463858850313034,
+        "agree": 1757,
+        "agreement": 1,
+        "cost_per_success_usd": 0.0013384880104166683,
+        "deterministic": true,
+        "errors": {},
+        "mismatches": [],
+        "n": 1757,
+        "strategy": "cheapest",
+        "total_cost_usd": 1.2849484900000014
+      },
+      "latency": {
+        "accuracy": 0.5463858850313034,
+        "agree": 1750,
+        "agreement": 0.9960159362549801,
+        "cost_per_success_usd": 0.001344133364583335,
+        "deterministic": false,
+        "errors": {},
+        "mismatches": [
+          {
+            "gateway": "deepseek-v3.1-terminus",
+            "offline": "qwen3-235b-a22b-2507",
+            "prompt_id": "arenahard:169"
+          },
+          {
+            "gateway": "deepseek-v3.1-terminus",
+            "offline": "qwen3-235b-a22b-2507",
+            "prompt_id": "arenahard:170"
+          },
+          {
+            "gateway": "deepseek-v3.1-terminus",
+            "offline": "qwen3-235b-a22b-2507",
+            "prompt_id": "arenahard:183"
+          },
+          {
+            "gateway": "deepseek-v3.1-terminus",
+            "offline": "qwen3-235b-a22b-2507",
+            "prompt_id": "arenahard:191"
+          },
+          {
+            "gateway": "deepseek-v3.1-terminus",
+            "offline": "qwen3-235b-a22b-2507",
+            "prompt_id": "arenahard:193"
+          },
+          {
+            "gateway": "deepseek-v3.1-terminus",
+            "offline": "qwen3-235b-a22b-2507",
+            "prompt_id": "arenahard:194"
+          },
+          {
+            "gateway": "deepseek-v3.1-terminus",
+            "offline": "qwen3-235b-a22b-2507",
+            "prompt_id": "arenahard:195"
+          }
+        ],
+        "n": 1757,
+        "strategy": "latency",
+        "total_cost_usd": 1.2903680300000016
+      },
+      "quality/balanced": {
+        "accuracy": 0.5976095617529881,
+        "agree": 1757,
+        "agreement": 1,
+        "cost_per_success_usd": 0.047385581566666744,
+        "deterministic": true,
+        "errors": {},
+        "mismatches": [],
+        "n": 1757,
+        "profile": "balanced",
+        "strategy": "quality",
+        "total_cost_usd": 49.75486064500008
+      },
+      "quality/economy": {
+        "accuracy": 0.5811041548093341,
+        "agree": 1757,
+        "agreement": 1,
+        "cost_per_success_usd": 0.04134050106268376,
+        "deterministic": true,
+        "errors": {},
+        "mismatches": [],
+        "n": 1757,
+        "profile": "economy",
+        "strategy": "quality",
+        "total_cost_usd": 42.20865158500012
+      },
+      "quality/strict": {
+        "accuracy": 0.6021627774615822,
+        "agree": 1757,
+        "agreement": 1,
+        "cost_per_success_usd": 0.07430973176276007,
+        "deterministic": true,
+        "errors": {},
+        "mismatches": [],
+        "n": 1757,
+        "profile": "strict",
+        "strategy": "quality",
+        "total_cost_usd": 78.61969620500015
+      },
+      "static": {
+        "accuracy": 0.5907797381900968,
+        "agree": 1757,
+        "agreement": 1,
+        "cost_per_success_usd": 0.04674419714836232,
+        "deterministic": true,
+        "errors": {},
+        "mismatches": [],
+        "n": 1757,
+        "strategy": "static",
+        "total_cost_usd": 48.52047664000008
+      },
+      "strongest": {
+        "accuracy": 0.5993170176437109,
+        "agree": 1757,
+        "agreement": 1,
+        "cost_per_success_usd": 0.09022565847578358,
+        "deterministic": true,
+        "errors": {},
+        "mismatches": [],
+        "n": 1757,
+        "strategy": "strongest",
+        "total_cost_usd": 95.0076183750001
+      }
+    }
+  },
+  "run_id": "2026-10-28-wsl",
+  "schema_version": 1
+}

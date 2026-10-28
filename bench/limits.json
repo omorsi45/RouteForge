@@ -1,0 +1,28 @@
+{
+  "expected_output_tokens": {
+    "claude-sonnet-4": 348.0,
+    "deepseek-v3.1-terminus": 284.0,
+    "gemini-2.5-flash": 426.0,
+    "gemini-2.5-pro": 2150.0,
+    "gpt-5": 1312.0,
+    "qwen3-235b-a22b-2507": 313.0
+  },
+  "max_output_tokens": 68462,
+  "max_output_tokens_by_model": {
+    "claude-sonnet-4": 32000,
+    "deepseek-v3.1-terminus": 10072,
+    "gemini-2.5-flash": 68462,
+    "gemini-2.5-pro": 49733,
+    "gpt-5": 60078,
+    "qwen3-235b-a22b-2507": 17017
+  },
+  "policy_version": "7ae71d0e6deb",
+  "source": {
+    "archive_bytes": 1283503080,
+    "archive_sha256": "b79f8cde1a6f029c2efa663a3a3b6f7748defb22341fe59f328cebef6648c8f1",
+    "dataset": "NPULH/LLMRouterBench",
+    "members": 48,
+    "revision": "0e5af1b84bf73437a01a1849c0f1d2468baa93fc",
+    "url": "https://huggingface.co/datasets/NPULH/LLMRouterBench/resolve/0e5af1b84bf73437a01a1849c0f1d2468baa93fc/bench-release.tar.gz"
+  }
+}
