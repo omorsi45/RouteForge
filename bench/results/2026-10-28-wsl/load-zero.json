@@ -1,0 +1,347 @@
+{
+  "config_path": "bench/configs/load-zero.yaml",
+  "created_at": "2026-10-28T17:34:58Z",
+  "env": {
+    "config_sha256": "fbb709689b83b2cdc84dec04bac0a25bf51ccb648db3339040809b34df3688bd",
+    "cpu_model": "AMD Ryzen 9 7900X 12-Core Processor",
+    "cpus": 24,
+    "dataset_revision": "0e5af1b84bf73437a01a1849c0f1d2468baa93fc",
+    "git_sha": "436b478f6143844eab3980ddda6d0d7b40886c43",
+    "go_version": "go1.27.3",
+    "kernel": "6.18.33.2-microsoft-standard-WSL2",
+    "os": "linux (Ubuntu 24.04.4 LTS)",
+    "policy_version": "7ae71d0e6deb",
+    "python_version": "3.14.10",
+    "ram_bytes": 16321802240
+  },
+  "kind": "load-zero",
+  "params": {
+    "listen": "127.0.0.1:18080",
+    "profile": "balanced",
+    "scenarios": [
+      {
+        "duration_s": 15,
+        "mode": "open",
+        "name": "open_loop_50rps",
+        "rps": 50
+      },
+      {
+        "duration_s": 15,
+        "mode": "open",
+        "name": "open_loop_200rps",
+        "rps": 200
+      },
+      {
+        "duration_s": 15,
+        "mode": "open",
+        "name": "open_loop_500rps",
+        "rps": 500
+      },
+      {
+        "concurrency": 1,
+        "mode": "closed",
+        "name": "closed_loop_c1",
+        "requests": 3000
+      },
+      {
+        "concurrency": 16,
+        "mode": "closed",
+        "name": "closed_loop_c16",
+        "requests": 3000
+      },
+      {
+        "concurrency": 64,
+        "mode": "closed",
+        "name": "closed_loop_c64",
+        "requests": 3000
+      }
+    ],
+    "seed": 20261026,
+    "strategy": "quality"
+  },
+  "results": {
+    "scenarios": {
+      "closed_loop_c1": {
+        "completed": 3000,
+        "concurrency": 1,
+        "cpu_method": "proc_stat_interval",
+        "cpu_percent": {
+          "mean": 75.2888907023113
+        },
+        "decision_us": {
+          "max": 662,
+          "mean": 106.38033333333334,
+          "n": 3000,
+          "p50": 101,
+          "p95": 139,
+          "p99": 173.00999999999976
+        },
+        "decisions_fetched": 3000,
+        "decisions_missing": 0,
+        "elapsed_s": 3.564684981,
+        "error_rate": 0,
+        "errors": {},
+        "latency_ms": {
+          "max": 6.202847,
+          "mean": 1.1689353206666682,
+          "n": 3000,
+          "p50": 1.201668,
+          "p95": 1.7424952499999997,
+          "p99": 2.067708499999999
+        },
+        "mode": "closed",
+        "overhead_ms": {
+          "max": 5.660847,
+          "mean": 0.8502373206666628,
+          "n": 3000,
+          "p50": 0.821042,
+          "p95": 1.0682963999999997,
+          "p99": 1.3194860899999998
+        },
+        "requests": 3000,
+        "rss_bytes": {
+          "max": 54337536,
+          "mean": 49573068.8
+        },
+        "samples": 5,
+        "stream_requests": 1500,
+        "throughput_rps": 841.5890930026616
+      },
+      "closed_loop_c16": {
+        "completed": 3000,
+        "concurrency": 16,
+        "cpu_method": "proc_stat_interval",
+        "cpu_percent": {
+          "mean": 177.30791234871333
+        },
+        "decision_us": {
+          "max": 1404,
+          "mean": 101.38266666666667,
+          "n": 3000,
+          "p50": 96,
+          "p95": 127,
+          "p99": 173.00999999999976
+        },
+        "decisions_fetched": 3000,
+        "decisions_missing": 0,
+        "elapsed_s": 1.235417436,
+        "error_rate": 0,
+        "errors": {},
+        "latency_ms": {
+          "max": 15.988927,
+          "mean": 6.553571613000019,
+          "n": 3000,
+          "p50": 6.4825325,
+          "p95": 7.8808992999999985,
+          "p99": 10.500269269999993
+        },
+        "mode": "closed",
+        "overhead_ms": {
+          "max": 15.985927,
+          "mean": 6.252927612999984,
+          "n": 3000,
+          "p50": 6.135082,
+          "p95": 7.488570299999998,
+          "p99": 9.955926959999994
+        },
+        "requests": 3000,
+        "rss_bytes": {
+          "max": 58433536,
+          "mean": 51791189.333333336
+        },
+        "samples": 3,
+        "stream_requests": 1500,
+        "throughput_rps": 2428.3290105677283
+      },
+      "closed_loop_c64": {
+        "completed": 3000,
+        "concurrency": 64,
+        "cpu_method": "proc_stat_interval",
+        "cpu_percent": {
+          "mean": 176.42537169999923
+        },
+        "decision_us": {
+          "max": 896,
+          "mean": 105.50766666666667,
+          "n": 3000,
+          "p50": 100,
+          "p95": 135,
+          "p99": 173
+        },
+        "decisions_fetched": 3000,
+        "decisions_missing": 0,
+        "elapsed_s": 1.292242287,
+        "error_rate": 0,
+        "errors": {},
+        "latency_ms": {
+          "max": 57.884152,
+          "mean": 27.244661776000022,
+          "n": 3000,
+          "p50": 27.1386075,
+          "p95": 31.041457249999997,
+          "p99": 32.15455037999999
+        },
+        "mode": "closed",
+        "overhead_ms": {
+          "max": 57.429152,
+          "mean": 26.918172442666666,
+          "n": 3000,
+          "p50": 26.7579405,
+          "p95": 30.611688149999996,
+          "p99": 31.537300379999998
+        },
+        "requests": 3000,
+        "rss_bytes": {
+          "max": 60104704,
+          "mean": 53435050.666666664
+        },
+        "samples": 3,
+        "stream_requests": 1500,
+        "throughput_rps": 2321.546067776994
+      },
+      "open_loop_200rps": {
+        "completed": 2917,
+        "cpu_method": "proc_stat_interval",
+        "cpu_percent": {
+          "mean": 10.125247356110597
+        },
+        "decision_us": {
+          "max": 732,
+          "mean": 118.83750428522454,
+          "n": 2917,
+          "p50": 112,
+          "p95": 171,
+          "p99": 234.6800000000003
+        },
+        "decisions_fetched": 2917,
+        "decisions_missing": 0,
+        "duration_s": 15,
+        "elapsed_s": 15.001700521,
+        "error_rate": 0,
+        "errors": {},
+        "latency_ms": {
+          "max": 10.348233,
+          "mean": 1.0191781350702742,
+          "n": 2917,
+          "p50": 0.875967,
+          "p95": 1.6520674,
+          "p99": 4.152864280000014
+        },
+        "mode": "open",
+        "overhead_ms": {
+          "max": 10.340233000000001,
+          "mean": 1.0151819060678773,
+          "n": 2917,
+          "p50": 0.871931,
+          "p95": 1.6451337999999993,
+          "p99": 4.142464280000013
+        },
+        "requests": 2917,
+        "rps": 200,
+        "rss_bytes": {
+          "max": 55107584,
+          "mean": 50918580.705882356
+        },
+        "samples": 17,
+        "stream_requests": 0,
+        "throughput_rps": 194.44462285569978
+      },
+      "open_loop_500rps": {
+        "completed": 7568,
+        "cpu_method": "proc_stat_interval",
+        "cpu_percent": {
+          "mean": 27.33349846042614
+        },
+        "decision_us": {
+          "max": 766,
+          "mean": 112.3703752642706,
+          "n": 7568,
+          "p50": 107,
+          "p95": 154.64999999999964,
+          "p99": 198
+        },
+        "decisions_fetched": 7568,
+        "decisions_missing": 0,
+        "duration_s": 15,
+        "elapsed_s": 14.999825959,
+        "error_rate": 0,
+        "errors": {},
+        "latency_ms": {
+          "max": 10.779167,
+          "mean": 1.0637302963794957,
+          "n": 7568,
+          "p50": 0.9244749999999999,
+          "p95": 1.7894538,
+          "p99": 2.6542011399999983
+        },
+        "mode": "open",
+        "overhead_ms": {
+          "max": 10.775167,
+          "mean": 1.0598851589587728,
+          "n": 7568,
+          "p50": 0.920514,
+          "p95": 1.782384899999999,
+          "p99": 2.6492111399999985
+        },
+        "requests": 7568,
+        "rps": 500,
+        "rss_bytes": {
+          "max": 64327680,
+          "mean": 53988608
+        },
+        "samples": 16,
+        "stream_requests": 0,
+        "throughput_rps": 504.53918736698057
+      },
+      "open_loop_50rps": {
+        "completed": 754,
+        "cpu_method": "proc_stat_interval",
+        "cpu_percent": {
+          "mean": 3.0003647314279887
+        },
+        "decision_us": {
+          "max": 557,
+          "mean": 124.36339522546419,
+          "n": 754,
+          "p50": 121,
+          "p95": 168.70000000000005,
+          "p99": 201.94000000000005
+        },
+        "decisions_fetched": 754,
+        "decisions_missing": 0,
+        "duration_s": 15,
+        "elapsed_s": 14.999356607,
+        "error_rate": 0,
+        "errors": {},
+        "latency_ms": {
+          "max": 9.716043,
+          "mean": 0.9812838050397881,
+          "n": 754,
+          "p50": 0.9335065,
+          "p95": 1.3153419500000003,
+          "p99": 1.9360926000000063
+        },
+        "mode": "open",
+        "overhead_ms": {
+          "max": 9.712043000000001,
+          "mean": 0.9760265106100787,
+          "n": 754,
+          "p50": 0.9290864999999999,
+          "p95": 1.3107419500000004,
+          "p99": 1.9325626000000062
+        },
+        "requests": 754,
+        "rps": 50,
+        "rss_bytes": {
+          "max": 56745984,
+          "mean": 47455744
+        },
+        "samples": 16,
+        "stream_requests": 0,
+        "throughput_rps": 50.26882284058226
+      }
+    }
+  },
+  "run_id": "2026-10-28-wsl",
+  "schema_version": 1
+}

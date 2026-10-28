@@ -1,0 +1,124 @@
+{
+  "config_path": "bench/configs/faults.yaml",
+  "created_at": "2026-10-28T18:23:14Z",
+  "env": {
+    "config_sha256": "a45e4ec0265317017de2e89fa60db3331ac46bfa067207a772cb6128a168e77a",
+    "cpu_model": "AMD Ryzen 9 7900X 12-Core Processor",
+    "cpus": 24,
+    "dataset_revision": "0e5af1b84bf73437a01a1849c0f1d2468baa93fc",
+    "git_sha": "436b478f6143844eab3980ddda6d0d7b40886c43",
+    "go_version": "go1.27.3",
+    "kernel": "6.18.33.2-microsoft-standard-WSL2",
+    "os": "linux (Ubuntu 24.04.4 LTS)",
+    "policy_version": "7ae71d0e6deb",
+    "python_version": "3.14.10",
+    "ram_bytes": 16321802240
+  },
+  "kind": "faults",
+  "params": {
+    "base_url": "http://127.0.0.1:18080",
+    "bench_budget_nanos": 100000000000,
+    "bench_strategies": [
+      "quality",
+      "cheapest",
+      "strongest",
+      "static",
+      "latency"
+    ],
+    "concurrency": 32,
+    "deadline_ms": 2000,
+    "over_budget_nanos": 3000000,
+    "over_max_tokens": 16,
+    "over_model": "gemini-2.5-flash",
+    "over_requests": 200,
+    "requests": 2000,
+    "seed": 20261026
+  },
+  "results": {
+    "accounting": {
+      "bench": {
+        "budget_nanos": 100000000000,
+        "day": "20261028",
+        "overshoot_nanos": 0,
+        "reserved_nanos": 0,
+        "spent_nanos": 728318360,
+        "tenant": "bench",
+        "usage_cost_nanos": 728318360,
+        "usage_records": 2090
+      },
+      "bench-over": {
+        "budget_nanos": 3000000,
+        "day": "20261028",
+        "overshoot_nanos": 3133700,
+        "reserved_nanos": 0,
+        "spent_nanos": 6133700,
+        "tenant": "bench-over",
+        "usage_cost_nanos": 6133700,
+        "usage_records": 43
+      }
+    },
+    "bench": {
+      "attempt_error_kinds": {
+        "rate_limited": 4,
+        "timeout": 32,
+        "unavailable": 199
+      },
+      "decisions_fetched": 2000,
+      "decisions_missing": 0,
+      "elapsed_s": 15.928910064,
+      "error_codes": {
+        "deadline_exceeded": 32,
+        "upstream_stream_interrupted": 113
+      },
+      "failovers": 90,
+      "partial_streams": 113,
+      "requests": 2000,
+      "requests_with_retries": 89,
+      "retries": 90,
+      "statuses": {
+        "200": 1968,
+        "504": 32
+      },
+      "stream_requests": 1000,
+      "succeeded": 1855,
+      "success_rate": 0.9275,
+      "tenant": "bench"
+    },
+    "bench_over": {
+      "attempt_error_kinds": {
+        "unavailable": 1
+      },
+      "decisions_fetched": 43,
+      "decisions_missing": 0,
+      "elapsed_s": 0.529873212,
+      "error_codes": {
+        "no_eligible_model": 157,
+        "upstream_stream_interrupted": 1
+      },
+      "failovers": 0,
+      "partial_streams": 1,
+      "requests": 200,
+      "requests_with_retries": 0,
+      "retries": 0,
+      "statuses": {
+        "200": 43,
+        "503": 157
+      },
+      "stream_requests": 100,
+      "succeeded": 42,
+      "success_rate": 0.21,
+      "tenant": "bench-over"
+    },
+    "invariants": {
+      "a_spent_equals_usage": true,
+      "b_reserved_returns_to_zero": true,
+      "c_spend_within_budget": true,
+      "d_overshoot_equals_excess": true,
+      "d_overshoot_positive": true,
+      "invariants_hold": true
+    },
+    "success_rate": 0.9275
+  },
+  "run_id": "2026-10-28-wsl",
+  "schema_version": 1
+}
