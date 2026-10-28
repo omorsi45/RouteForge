@@ -684,3 +684,186 @@ func TestFaultsCLIExitsOneOnErrors(t *testing.T) {
 		})
 	}
 }
+
+// reportRoot is a repository root that holds the golden inputs of the report
+// renderer (synthetic files of internal/bench/testdata/report) where the report
+// command reads them: the results of run golden-run and the trainer reports.
+func reportRoot(t *testing.T) string {
+	t.Helper()
+	src := filepath.Join("..", "..", "internal", "bench", "testdata", "report")
+	root := t.TempDir()
+	for name, dest := range map[string]string{
+		"replay.json":        "bench/results/golden-run/replay.json",
+		"load-zero.json":     "bench/results/golden-run/load-zero.json",
+		"load-profiled.json": "bench/results/golden-run/load-profiled.json",
+		"faults.json":        "bench/results/golden-run/faults.json",
+		"evaluation.json":    "trainer/artifacts/reports/evaluation.json",
+		"training.json":      "trainer/artifacts/reports/training.json",
+	} {
+		data, err := os.ReadFile(filepath.Join(src, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeUnder(t, root, dest, string(data))
+	}
+	return root
+}
+
+func writeUnder(t *testing.T, root, rel, content string) {
+	t.Helper()
+	path := filepath.Join(root, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func readUnder(t *testing.T, root, rel string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+func goldenReport(t *testing.T, name string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("..", "..", "internal", "bench", "testdata", "report", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+const (
+	readmeBefore = "# Project\n\nIntroduction.\n\n<!-- results:begin -->\n"
+	readmeAfter  = "<!-- results:end -->\n\nTail text.\n"
+)
+
+func TestReportCLIWritesBothFiles(t *testing.T) {
+	root := reportRoot(t)
+	writeUnder(t, root, "README.md", readmeBefore+"stale results\n"+readmeAfter)
+
+	code, out, errText := runCLI(t, "report", "--root", root, "--run-id", "golden-run")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr %q", code, errText)
+	}
+	if want := "report OK: wrote docs/benchmarks.md and README.md for run golden-run\n"; out != want {
+		t.Errorf("stdout %q, want %q", out, want)
+	}
+	if got, want := readUnder(t, root, "docs/benchmarks.md"), goldenReport(t, "benchmarks.md"); got != want {
+		t.Errorf("docs/benchmarks.md is not the golden file")
+	}
+	if got, want := readUnder(t, root, "README.md"), readmeBefore+goldenReport(t, "readme-results.md")+readmeAfter; got != want {
+		t.Errorf("README.md:\n%s\nwant:\n%s", got, want)
+	}
+
+	// A second run changes nothing.
+	if code, _, errText := runCLI(t, "report", "--root", root, "--run-id", "golden-run"); code != 0 {
+		t.Fatalf("second run: exit %d, stderr %q", code, errText)
+	}
+	if got, want := readUnder(t, root, "README.md"), readmeBefore+goldenReport(t, "readme-results.md")+readmeAfter; got != want {
+		t.Errorf("README.md changed on the second run:\n%s", got)
+	}
+}
+
+func TestReportCLIWritesWhereItIsTold(t *testing.T) {
+	root := reportRoot(t)
+	writeUnder(t, root, "site/index.md", readmeBefore+readmeAfter)
+
+	code, out, errText := runCLI(t, "report", "--root", root, "--run-id", "golden-run", "--out", "site/results.md", "--readme", "site/index.md")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr %q", code, errText)
+	}
+	if want := "report OK: wrote site/results.md and site/index.md for run golden-run\n"; out != want {
+		t.Errorf("stdout %q, want %q", out, want)
+	}
+	if got := readUnder(t, root, "site/results.md"); got != goldenReport(t, "benchmarks.md") {
+		t.Error("site/results.md is not the golden file")
+	}
+	if _, err := os.Stat(filepath.Join(root, "docs", "benchmarks.md")); err == nil {
+		t.Error("the default output was written as well")
+	}
+}
+
+func TestReportCLIRejectsBadFlags(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"no run id", []string{"report"}, "--run-id is required"},
+		{"run id with a path", []string{"report", "--run-id", "../x"}, "--run-id"},
+		{"no output", []string{"report", "--run-id", "r", "--out", ""}, "--out"},
+		{"no README", []string{"report", "--run-id", "r", "--readme", ""}, "--readme"},
+		{"unknown flag", []string{"report", "--bogus"}, "bogus"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			code, _, errText := runCLI(t, c.args...)
+			if code != 2 {
+				t.Fatalf("exit %d, want 2; stderr %q", code, errText)
+			}
+			if !strings.Contains(errText, c.want) {
+				t.Errorf("stderr %q does not mention %q", errText, c.want)
+			}
+		})
+	}
+}
+
+func TestReportCLIWritesNothingOnAnError(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		runID  string
+		damage func(t *testing.T, root string)
+		want   string
+	}{
+		{"a result file is missing", "golden-run", func(t *testing.T, root string) {
+			if err := os.Remove(filepath.Join(root, "bench", "results", "golden-run", "faults.json")); err != nil {
+				t.Fatal(err)
+			}
+		}, "faults.json"},
+		{"a result file is of another run", "other-run", func(t *testing.T, root string) {
+			if err := os.Rename(filepath.Join(root, "bench", "results", "golden-run"), filepath.Join(root, "bench", "results", "other-run")); err != nil {
+				t.Fatal(err)
+			}
+		}, "golden-run"},
+		{"the README has no markers", "golden-run", func(t *testing.T, root string) {
+			writeUnder(t, root, "README.md", "# Project\n")
+		}, "results:begin"},
+		{"the README is missing", "golden-run", func(t *testing.T, root string) {
+			if err := os.Remove(filepath.Join(root, "README.md")); err != nil {
+				t.Fatal(err)
+			}
+		}, "README.md"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			root := reportRoot(t)
+			writeUnder(t, root, "README.md", readmeBefore+"stale results\n"+readmeAfter)
+			c.damage(t, root)
+			readmeBeforeRun, readmeErr := os.ReadFile(filepath.Join(root, "README.md"))
+
+			code, out, errText := runCLI(t, "report", "--root", root, "--run-id", c.runID)
+			if code != 1 || out != "" || !strings.HasPrefix(errText, "report: ") || !strings.Contains(errText, c.want) {
+				t.Errorf("exit %d, stdout %q, stderr %q, want exit 1 and a reason that mentions %q", code, out, errText, c.want)
+			}
+			if _, err := os.Stat(filepath.Join(root, "docs", "benchmarks.md")); err == nil {
+				t.Error("docs/benchmarks.md was written although the command failed")
+			}
+			if readmeErr == nil {
+				if now, _ := os.ReadFile(filepath.Join(root, "README.md")); string(now) != string(readmeBeforeRun) {
+					t.Errorf("README.md changed although the command failed:\n%s", now)
+				}
+			}
+		})
+	}
+}
+
+func TestBenchCLIHelpListsReport(t *testing.T) {
+	_, out, _ := runCLI(t, "help")
+	if !strings.Contains(out, "report") {
+		t.Errorf("usage %q does not list report", out)
+	}
+}

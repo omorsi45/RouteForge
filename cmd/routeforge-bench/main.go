@@ -24,6 +24,7 @@ Commands:
   replay  Check that the gateway makes the routing decisions the trainer made offline
   load    Measure throughput, latency and gateway overhead under open and closed loop load
   faults  Inject provider faults and check the accounting invariants
+  report  Render docs/benchmarks.md and the README results block from the result files
   help    Show this help
 `
 
@@ -79,6 +80,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return cmdLoad(ctx, args[1:], stdout, stderr)
 	case "faults":
 		return cmdFaults(ctx, args[1:], stdout, stderr)
+	case "report":
+		return cmdReport(args[1:], stdout, stderr)
 	case "help":
 		fmt.Fprint(stdout, usageText)
 		return 0
@@ -187,6 +190,84 @@ func cmdReplay(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	}
 	fmt.Fprintf(stdout, "replay OK: %d requests, deterministic agreement %.4f, overall agreement %.4f, parity %s\n",
 		results.Requests, results.DeterministicAgreement, results.OverallAgreement, passFail(results.ParityPass))
+	return 0
+}
+
+// underRoot is the path of a file named on the command line: relative paths
+// resolve against the repository root.
+func underRoot(root, p string) string {
+	if filepath.IsAbs(p) {
+		return p
+	}
+	return filepath.Join(root, p)
+}
+
+// cmdReport renders docs/benchmarks.md and the results block of the README from
+// the result files of one run and the trainer's reports. Both texts are
+// rendered, and the README's markers checked, before anything is written, so an
+// error leaves both files as they were. It exits 1 on any error.
+func cmdReport(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("report", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	root := fs.String("root", ".", "repository root")
+	runID := fs.String("run-id", "", "run whose results under bench/results are reported (required)")
+	out := fs.String("out", "docs/benchmarks.md", "file to write the benchmark document to (relative paths resolve against --root)")
+	readme := fs.String("readme", "README.md", "README whose results block, between "+bench.ReadmeBeginMarker+" and "+bench.ReadmeEndMarker+", is rewritten")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if err := checkRunID(*runID); err != nil {
+		fmt.Fprintf(stderr, "report: %v\n", err)
+		return 2
+	}
+	for _, f := range []struct{ flag, value string }{{"--out", *out}, {"--readme", *readme}} {
+		if f.value == "" {
+			fmt.Fprintf(stderr, "report: %s must not be empty\n", f.flag)
+			return 2
+		}
+	}
+
+	in, err := bench.LoadReportInputs(resultDir(*root, *runID), filepath.Join(*root, "trainer", "artifacts", "reports"), *runID)
+	if err != nil {
+		fmt.Fprintf(stderr, "report: %v\n", err)
+		return 1
+	}
+	doc, err := bench.RenderBenchmarks(in)
+	if err != nil {
+		fmt.Fprintf(stderr, "report: %v\n", err)
+		return 1
+	}
+	block, err := bench.RenderReadmeResults(in)
+	if err != nil {
+		fmt.Fprintf(stderr, "report: %v\n", err)
+		return 1
+	}
+	readmePath := underRoot(*root, *readme)
+	old, err := os.ReadFile(readmePath)
+	if err != nil {
+		fmt.Fprintf(stderr, "report: read the README: %v\n", err)
+		return 1
+	}
+	updated, err := bench.ReplaceReadmeResults(string(old), block)
+	if err != nil {
+		fmt.Fprintf(stderr, "report: %s: %v\n", *readme, err)
+		return 1
+	}
+
+	outPath := underRoot(*root, *out)
+	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
+		fmt.Fprintf(stderr, "report: %v\n", err)
+		return 1
+	}
+	if err := os.WriteFile(outPath, []byte(doc), 0o644); err != nil {
+		fmt.Fprintf(stderr, "report: %v\n", err)
+		return 1
+	}
+	if err := os.WriteFile(readmePath, []byte(updated), 0o644); err != nil {
+		fmt.Fprintf(stderr, "report: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "report OK: wrote %s and %s for run %s\n", *out, *readme, *runID)
 	return 0
 }
 

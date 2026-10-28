@@ -1,0 +1,128 @@
+{
+  "config_path": "bench/configs/load-profiled.yaml",
+  "created_at": "2026-01-02T04:14:05Z",
+  "env": {
+    "config_sha256": "sha256-load-profiled",
+    "cpu_model": "Test CPU 1.00GHz",
+    "cpus": 4,
+    "dataset_revision": "rev-test-1",
+    "git_sha": "gitsha-1111",
+    "go_version": "go1.99.0",
+    "kernel": "6.1.0-test",
+    "os": "linux (Test Linux 1.0)",
+    "policy_version": "pol-test-1",
+    "python_version": "3.99.0",
+    "ram_bytes": 8589934592
+  },
+  "kind": "load-profiled",
+  "params": {
+    "profile": "balanced",
+    "seed": 1,
+    "strategy": "quality"
+  },
+  "results": {
+    "overhead_target": {
+      "p95_ms": 12.5,
+      "p95_ms_below": 20,
+      "pass": true,
+      "scenario": "profiled open loop 200 rps"
+    },
+    "scenarios": {
+      "closed_loop_c1": {
+        "completed": 3000,
+        "concurrency": 1,
+        "cpu_method": "ps_lifetime_average",
+        "cpu_percent": {
+          "mean": 2.5
+        },
+        "decision_us": {
+          "max": 500,
+          "mean": 80,
+          "n": 3000,
+          "p50": 75,
+          "p95": 90,
+          "p99": 150
+        },
+        "decisions_fetched": 3000,
+        "decisions_missing": 0,
+        "elapsed_s": 2000,
+        "error_rate": 0,
+        "errors": {},
+        "latency_ms": {
+          "max": 1500,
+          "mean": 650,
+          "n": 3000,
+          "p50": 600.25,
+          "p95": 900.5,
+          "p99": 1200.75
+        },
+        "mode": "closed",
+        "overhead_ms": {
+          "max": 3,
+          "mean": 0.75,
+          "n": 3000,
+          "p50": 0.5,
+          "p95": 1.25,
+          "p99": 2
+        },
+        "requests": 3000,
+        "rss_bytes": {
+          "max": 31457280,
+          "mean": 30000000
+        },
+        "samples": 2000,
+        "stream_requests": 1500,
+        "throughput_rps": 1.5
+      },
+      "open_loop_200rps": {
+        "completed": 3000,
+        "cpu_method": "ps_lifetime_average",
+        "cpu_percent": {
+          "mean": 30.5
+        },
+        "decision_us": {
+          "max": 700,
+          "mean": 100,
+          "n": 3000,
+          "p50": 90,
+          "p95": 180,
+          "p99": 300
+        },
+        "decisions_fetched": 3000,
+        "decisions_missing": 0,
+        "duration_s": 15,
+        "elapsed_s": 15,
+        "error_rate": 0,
+        "errors": {},
+        "latency_ms": {
+          "max": 700,
+          "mean": 140,
+          "n": 3000,
+          "p50": 100.5,
+          "p95": 250.25,
+          "p99": 400.75
+        },
+        "mode": "open",
+        "overhead_ms": {
+          "max": 30,
+          "mean": 6,
+          "n": 3000,
+          "p50": 4.5,
+          "p95": 12.5,
+          "p99": 20.5
+        },
+        "requests": 3000,
+        "rps": 200,
+        "rss_bytes": {
+          "max": 78643200,
+          "mean": 70000000
+        },
+        "samples": 16,
+        "stream_requests": 0,
+        "throughput_rps": 199.5
+      }
+    }
+  },
+  "run_id": "golden-run",
+  "schema_version": 1
+}
