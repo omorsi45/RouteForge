@@ -1,16 +1,20 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"strings"
 
 	"github.com/omorsi45/routeforge/internal/config"
+	"github.com/omorsi45/routeforge/internal/policy"
 )
 
 // cmdValidateConfig loads the file named by --config and reports whether it
-// is a valid gateway configuration. It returns the process exit code.
+// is a valid gateway configuration. Beyond the file itself it checks that
+// every model is priced and, when policy.path is set, that the policy
+// artifact loads. It returns the process exit code.
 func cmdValidateConfig(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("validate-config", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -25,12 +29,38 @@ func cmdValidateConfig(args []string, stdout, stderr io.Writer) int {
 
 	c, err := config.Load(*path)
 	if err != nil {
-		fmt.Fprintf(stderr, "invalid config %s:\n", *path)
-		for _, line := range strings.Split(err.Error(), "\n") {
-			fmt.Fprintf(stderr, "  %s\n", line)
-		}
+		reportInvalid(stderr, *path, err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "config OK: %d tenants, %d providers, %d models\n", len(c.Tenants), len(c.Providers), len(c.Models))
+
+	var errs []error
+	if _, err := modelPrices(c); err != nil {
+		errs = append(errs, err)
+	}
+	var pol *policy.Policy
+	if c.Policy.Path != "" {
+		if pol, err = policy.LoadFile(c.Policy.Path); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if err := errors.Join(errs...); err != nil {
+		reportInvalid(stderr, *path, err)
+		return 1
+	}
+
+	fmt.Fprintf(stdout, "config OK: %d tenants, %d providers, %d models", len(c.Tenants), len(c.Providers), len(c.Models))
+	if pol != nil {
+		fmt.Fprintf(stdout, ", policy %s", pol.Version)
+	}
+	fmt.Fprintln(stdout)
 	return 0
+}
+
+// reportInvalid prints err under an "invalid config" heading, one indented
+// line per problem.
+func reportInvalid(stderr io.Writer, path string, err error) {
+	fmt.Fprintf(stderr, "invalid config %s:\n", path)
+	for _, line := range strings.Split(err.Error(), "\n") {
+		fmt.Fprintf(stderr, "  %s\n", line)
+	}
 }

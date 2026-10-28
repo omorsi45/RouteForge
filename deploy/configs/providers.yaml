@@ -22,13 +22,21 @@ providers:
     max_tokens_param: max_tokens
 
 models:
+  # Prices are USD per 1M tokens: gpt-5 and claude-sonnet-4 are copied from
+  # deploy/prices.yaml, and the local llama3.2 model is free.
   - name: gpt-5
     provider: openai
     upstream_model: gpt-5
     strongest: true
+    input_per_mtok: 1.25
+    output_per_mtok: 10.0
   - name: claude-sonnet-4
     provider: anthropic
     upstream_model: claude-sonnet-4-20250514
+    input_per_mtok: 3.0
+    output_per_mtok: 15.0
   - name: llama3.2
     provider: ollama
     upstream_model: llama3.2
+    input_per_mtok: 0
+    output_per_mtok: 0

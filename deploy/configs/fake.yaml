@@ -22,8 +22,14 @@ providers:
       jitter: 0.1
 
 models:
+  # Prices are USD per 1M tokens. These models have explicit prices, so this
+  # config needs no price file.
   - name: fake-fast
     provider: fake-fast
+    input_per_mtok: 0.1
+    output_per_mtok: 0.4
   - name: fake-strong
     provider: fake-strong
     strongest: true
+    input_per_mtok: 1.0
+    output_per_mtok: 4.0

@@ -4,9 +4,12 @@ import (
 	"math"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/omorsi45/routeforge/internal/config"
 )
+
+func ptr(v float64) *float64 { return &v }
 
 func valid(t *testing.T) *config.Config {
 	t.Helper()
@@ -74,6 +77,28 @@ func TestValidateRejects(t *testing.T) {
 		{"dup model name", func(c *config.Config) { c.Models[1].Name = c.Models[0].Name }, "models[1].name: duplicates models[0]"},
 		{"model unknown provider", func(c *config.Config) { c.Models[0].Provider = "ghost" }, `models[0].provider: unknown provider "ghost"`},
 		{"dup policy name", func(c *config.Config) { c.Models[1].PolicyName = c.Models[0].PolicyName }, `models[1].policy_name: duplicates models[0]`},
+		{"only output price", func(c *config.Config) { c.Models[1].OutputPerMTok = ptr(1.0) }, "models[1].input_per_mtok: required when output_per_mtok is set"},
+		{"negative input price", func(c *config.Config) { c.Models[0].InputPerMTok, c.Models[0].OutputPerMTok = ptr(-1.0), ptr(1.0) }, "models[0].input_per_mtok: must be finite and not negative"},
+		{"negative output price", func(c *config.Config) { c.Models[0].InputPerMTok, c.Models[0].OutputPerMTok = ptr(1.0), ptr(-0.5) }, "models[0].output_per_mtok: must be finite and not negative"},
+		{"nan input price", func(c *config.Config) {
+			c.Models[0].InputPerMTok, c.Models[0].OutputPerMTok = ptr(math.NaN()), ptr(1.0)
+		}, "models[0].input_per_mtok: must be finite and not negative"},
+		{"inf output price", func(c *config.Config) {
+			c.Models[0].InputPerMTok, c.Models[0].OutputPerMTok = ptr(1.0), ptr(math.Inf(1))
+		}, "models[0].output_per_mtok: must be finite and not negative"},
+		{"negative context window", func(c *config.Config) { c.Models[0].ContextWindow = -1 }, "models[0].context_window: must not be negative"},
+		{"zero ttft prior", func(c *config.Config) { c.Models[0].LatencyPrior.TTFTMS = 0 }, "models[0].latency_prior.ttft_ms: must be positive"},
+		{"negative ttft prior", func(c *config.Config) { c.Models[0].LatencyPrior.TTFTMS = -5 }, "models[0].latency_prior.ttft_ms: must be positive"},
+		{"nan ttft prior", func(c *config.Config) { c.Models[0].LatencyPrior.TTFTMS = math.NaN() }, "models[0].latency_prior.ttft_ms: must be positive"},
+		{"inf decode prior", func(c *config.Config) { c.Models[0].LatencyPrior.DecodeTokensPerS = math.Inf(1) }, "models[0].latency_prior.decode_tokens_per_s: must be positive"},
+		{"zero decode prior", func(c *config.Config) { c.Models[1].LatencyPrior.DecodeTokensPerS = 0 }, "models[1].latency_prior.decode_tokens_per_s: must be positive"},
+		{"prior jitter one", func(c *config.Config) { c.Models[0].LatencyPrior.Jitter = 1 }, "models[0].latency_prior.jitter: must be in [0, 1)"},
+		{"prior jitter negative", func(c *config.Config) { c.Models[0].LatencyPrior.Jitter = -0.1 }, "models[0].latency_prior.jitter: must be in [0, 1)"},
+		{"prior jitter nan", func(c *config.Config) { c.Models[0].LatencyPrior.Jitter = math.NaN() }, "models[0].latency_prior.jitter: must be in [0, 1)"},
+		{"zero max concurrency", func(c *config.Config) { c.Models[0].MaxConcurrency = 0 }, "models[0].max_concurrency: must be at least 1"},
+		{"negative queue size", func(c *config.Config) { c.Models[0].QueueSize = -1 }, "models[0].queue_size: must not be negative"},
+		{"zero queue timeout", func(c *config.Config) { c.Models[0].QueueTimeout = 0 }, "models[0].queue_timeout: must be positive"},
+		{"negative queue timeout", func(c *config.Config) { c.Models[0].QueueTimeout = -time.Second }, "models[0].queue_timeout: must be positive"},
 		{"zero deadline", func(c *config.Config) { c.Server.DefaultDeadline = 0 }, "server.default_deadline: must be positive"},
 		{"empty listen", func(c *config.Config) { c.Server.Listen = "" }, "server.listen: must not be empty"},
 		{"zero body bytes", func(c *config.Config) { c.Server.MaxBodyBytes = 0 }, "server.max_body_bytes: must be positive"},
@@ -91,6 +116,25 @@ func TestValidateRejects(t *testing.T) {
 				t.Fatalf("error %q does not contain %q", err.Error(), tc.want)
 			}
 		})
+	}
+}
+
+func TestValidateModelPricePair(t *testing.T) {
+	c := valid(t)
+	c.Models[0].InputPerMTok = ptr(1.0)
+	err := c.Validate()
+	if err == nil || !strings.Contains(err.Error(), "models[0].output_per_mtok: required when input_per_mtok is set") {
+		t.Fatalf("only input_per_mtok: err = %v", err)
+	}
+
+	c.Models[0].OutputPerMTok = ptr(2.0)
+	if err := c.Validate(); err != nil {
+		t.Fatalf("both prices set: %v", err)
+	}
+
+	c.Models[0].InputPerMTok, c.Models[0].OutputPerMTok = ptr(0), ptr(0)
+	if err := c.Validate(); err != nil {
+		t.Fatalf("both prices zero: %v", err)
 	}
 }
 

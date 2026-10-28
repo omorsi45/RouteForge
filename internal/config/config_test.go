@@ -1,6 +1,8 @@
 package config_test
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -146,6 +148,125 @@ func TestTenantAllows(t *testing.T) {
 	limited := config.Tenant{AllowedModels: []string{"a"}}
 	if !limited.Allows("a") || limited.Allows("b") {
 		t.Error("limited tenant allow mismatch")
+	}
+}
+
+func TestModelDefaults(t *testing.T) {
+	c, err := config.Load("testdata/minimal.yaml")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	m, _ := c.Model("m-fast")
+	if m.LatencyPrior.TTFTMS != 500 || m.LatencyPrior.DecodeTokensPerS != 50 || m.LatencyPrior.Jitter != 0.1 {
+		t.Errorf("LatencyPrior = %+v", m.LatencyPrior)
+	}
+	if m.MaxConcurrency != 64 || m.QueueSize != 128 || m.QueueTimeout != 2*time.Second {
+		t.Errorf("MaxConcurrency, QueueSize, QueueTimeout = %d, %d, %v", m.MaxConcurrency, m.QueueSize, m.QueueTimeout)
+	}
+	if m.ContextWindow != 0 || m.InputPerMTok != nil || m.OutputPerMTok != nil {
+		t.Errorf("unset fields = %d, %v, %v", m.ContextWindow, m.InputPerMTok, m.OutputPerMTok)
+	}
+	if c.Policy.Path != "" || c.Pricing.File != "" {
+		t.Errorf("Policy, Pricing = %+v, %+v", c.Policy, c.Pricing)
+	}
+}
+
+func TestParseRoutingFields(t *testing.T) {
+	doc := strings.Replace(minimalDoc, "    provider: fake\n", `    provider: fake
+    input_per_mtok: 0
+    output_per_mtok: 2.5
+    context_window: 128000
+    latency_prior: {ttft_ms: 250}
+    max_concurrency: 8
+    queue_size: 4
+    queue_timeout: 750ms
+`, 1)
+	c, err := config.Parse([]byte(doc))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	m := c.Models[0]
+	if m.InputPerMTok == nil || *m.InputPerMTok != 0 {
+		t.Errorf("InputPerMTok = %v, want a pointer to 0", m.InputPerMTok)
+	}
+	if m.OutputPerMTok == nil || *m.OutputPerMTok != 2.5 {
+		t.Errorf("OutputPerMTok = %v, want a pointer to 2.5", m.OutputPerMTok)
+	}
+	if m.ContextWindow != 128000 {
+		t.Errorf("ContextWindow = %d", m.ContextWindow)
+	}
+	// Defaults fill the unset latency_prior fields one by one.
+	if m.LatencyPrior.TTFTMS != 250 || m.LatencyPrior.DecodeTokensPerS != 50 || m.LatencyPrior.Jitter != 0.1 {
+		t.Errorf("LatencyPrior = %+v", m.LatencyPrior)
+	}
+	if m.MaxConcurrency != 8 || m.QueueSize != 4 || m.QueueTimeout != 750*time.Millisecond {
+		t.Errorf("MaxConcurrency, QueueSize, QueueTimeout = %d, %d, %v", m.MaxConcurrency, m.QueueSize, m.QueueTimeout)
+	}
+}
+
+func TestConfigResolvesRelativePaths(t *testing.T) {
+	root := t.TempDir()
+	sub := filepath.Join(root, "sub")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	abs := filepath.ToSlash(filepath.Join(root, "elsewhere", "prices.yaml"))
+	doc := minimalDoc + "policy:\n  path: ../p.json\npricing:\n  file: " + abs + "\n"
+	path := filepath.Join(sub, "c.yaml")
+	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.Dir != sub {
+		t.Errorf("Dir = %q, want %q", c.Dir, sub)
+	}
+	if want := filepath.Join(root, "p.json"); c.Policy.Path != want {
+		t.Errorf("Policy.Path = %q, want %q", c.Policy.Path, want)
+	}
+	if c.Pricing.File != abs {
+		t.Errorf("Pricing.File = %q, want the absolute path %q unchanged", c.Pricing.File, abs)
+	}
+}
+
+func TestConfigResolvesRelativePathsFromRelativeConfig(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "c.yaml")
+	if err := os.WriteFile(path, []byte(minimalDoc+"pricing:\n  file: prices.yaml\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(root)
+
+	c, err := config.Load("c.yaml")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !filepath.IsAbs(c.Pricing.File) || filepath.Base(c.Pricing.File) != "prices.yaml" {
+		t.Errorf("Pricing.File = %q, want an absolute path to prices.yaml", c.Pricing.File)
+	}
+	if !filepath.IsAbs(c.Dir) {
+		t.Errorf("Dir = %q, want an absolute path", c.Dir)
+	}
+}
+
+func TestResolvePath(t *testing.T) {
+	dir := t.TempDir()
+	c := &config.Config{Dir: dir}
+	if got, want := c.ResolvePath("a/b.json"), filepath.Join(dir, "a", "b.json"); got != want {
+		t.Errorf("relative = %q, want %q", got, want)
+	}
+	abs := filepath.Join(t.TempDir(), "x.json")
+	if got := c.ResolvePath(abs); got != abs {
+		t.Errorf("absolute = %q, want %q", got, abs)
+	}
+	if got := c.ResolvePath(""); got != "" {
+		t.Errorf("empty = %q, want empty", got)
+	}
+	if got := (&config.Config{}).ResolvePath("rel.json"); got != "rel.json" {
+		t.Errorf("no Dir = %q, want the path unchanged", got)
 	}
 }
 

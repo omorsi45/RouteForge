@@ -92,5 +92,24 @@ func (c *Config) ApplyDefaults() {
 		if m.PolicyName == "" {
 			m.PolicyName = m.Name
 		}
+		lp := &m.LatencyPrior
+		if lp.TTFTMS == 0 {
+			lp.TTFTMS = 500
+		}
+		if lp.DecodeTokensPerS == 0 {
+			lp.DecodeTokensPerS = 50
+		}
+		if lp.Jitter == 0 {
+			lp.Jitter = 0.1
+		}
+		if m.MaxConcurrency == 0 {
+			m.MaxConcurrency = 64
+		}
+		if m.QueueSize == 0 {
+			m.QueueSize = 128
+		}
+		if m.QueueTimeout == 0 {
+			m.QueueTimeout = 2 * time.Second
+		}
 	}
 }

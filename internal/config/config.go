@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"slices"
 	"time"
 
@@ -25,9 +26,26 @@ var Profiles = []string{"strict", "balanced", "economy"}
 type Config struct {
 	Server    Server     `yaml:"server"`
 	Defaults  Defaults   `yaml:"defaults"`
+	Policy    Policy     `yaml:"policy"`
+	Pricing   Pricing    `yaml:"pricing"`
 	Tenants   []Tenant   `yaml:"tenants"`
 	Providers []Provider `yaml:"providers"`
 	Models    []Model    `yaml:"models"`
+
+	// Dir is the absolute directory of the file Load read; it is empty for
+	// a Config built by Parse. Relative file paths in the config resolve
+	// against it.
+	Dir string `yaml:"-"`
+}
+
+// Policy locates the trained routing policy artifact.
+type Policy struct {
+	Path string `yaml:"path"`
+}
+
+// Pricing locates the price table.
+type Pricing struct {
+	File string `yaml:"file"`
 }
 
 // Server holds HTTP server settings.
@@ -100,6 +118,25 @@ type Model struct {
 	UpstreamModel string `yaml:"upstream_model"`
 	PolicyName    string `yaml:"policy_name"`
 	Strongest     bool   `yaml:"strongest"`
+
+	// InputPerMTok and OutputPerMTok are optional USD prices per 1M tokens.
+	// Set both or neither; both set override the price file.
+	InputPerMTok  *float64 `yaml:"input_per_mtok"`
+	OutputPerMTok *float64 `yaml:"output_per_mtok"`
+	// ContextWindow is the model's context size in tokens; 0 means unknown
+	// and disables the context check.
+	ContextWindow  int           `yaml:"context_window"`
+	LatencyPrior   LatencyPrior  `yaml:"latency_prior"`
+	MaxConcurrency int           `yaml:"max_concurrency"`
+	QueueSize      int           `yaml:"queue_size"`
+	QueueTimeout   time.Duration `yaml:"queue_timeout"`
+}
+
+// LatencyPrior is the latency assumed for a model before any is observed.
+type LatencyPrior struct {
+	TTFTMS           float64 `yaml:"ttft_ms"`
+	DecodeTokensPerS float64 `yaml:"decode_tokens_per_s"`
+	Jitter           float64 `yaml:"jitter"`
 }
 
 // Parse strictly decodes one YAML document, applies defaults and validates.
@@ -126,13 +163,37 @@ func Parse(data []byte) (*Config, error) {
 	return &c, nil
 }
 
-// Load reads and parses the configuration file at path.
+// Load reads and parses the configuration file at path. Relative file paths
+// in the configuration (policy.path, pricing.file) resolve against the
+// directory of the file and are stored absolute.
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
-	return Parse(data)
+	c, err := Parse(data)
+	if err != nil {
+		return nil, err
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolve config path: %w", err)
+	}
+	c.Dir = filepath.Dir(abs)
+	c.Policy.Path = c.ResolvePath(c.Policy.Path)
+	c.Pricing.File = c.ResolvePath(c.Pricing.File)
+	return c, nil
+}
+
+// ResolvePath resolves a file path from the configuration: absolute paths are
+// unchanged and relative ones are joined to Dir. An empty p stays empty. A
+// Config without a Dir (built by Parse) leaves a relative path relative to the
+// working directory.
+func (c *Config) ResolvePath(p string) string {
+	if p == "" || filepath.IsAbs(p) {
+		return p
+	}
+	return filepath.Join(c.Dir, p)
 }
 
 // Model returns the configured model with the given client-facing name.

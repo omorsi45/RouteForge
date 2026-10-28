@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"regexp"
 	"strings"
@@ -174,6 +175,56 @@ func (c *Config) validateModels(add addFunc) {
 		} else {
 			policies[m.PolicyName] = i
 		}
+
+		validateModelRouting(base, m, add)
+	}
+}
+
+func validateModelRouting(base string, m Model, add addFunc) {
+	switch {
+	case m.InputPerMTok != nil && m.OutputPerMTok == nil:
+		add(base+".output_per_mtok", "required when input_per_mtok is set")
+	case m.InputPerMTok == nil && m.OutputPerMTok != nil:
+		add(base+".input_per_mtok", "required when output_per_mtok is set")
+	}
+	for _, r := range []struct {
+		path string
+		v    *float64
+	}{
+		{"input_per_mtok", m.InputPerMTok},
+		{"output_per_mtok", m.OutputPerMTok},
+	} {
+		if r.v != nil && !(*r.v >= 0 && !math.IsInf(*r.v, 1)) {
+			add(base+"."+r.path, "must be finite and not negative")
+		}
+	}
+
+	if m.ContextWindow < 0 {
+		add(base+".context_window", "must not be negative")
+	}
+	lp := m.LatencyPrior
+	for _, v := range []struct {
+		path string
+		v    float64
+	}{
+		{"ttft_ms", lp.TTFTMS},
+		{"decode_tokens_per_s", lp.DecodeTokensPerS},
+	} {
+		if !(v.v > 0 && !math.IsInf(v.v, 1)) {
+			add(base+".latency_prior."+v.path, "must be positive")
+		}
+	}
+	if !(lp.Jitter >= 0 && lp.Jitter < 1) {
+		add(base+".latency_prior.jitter", "must be in [0, 1)")
+	}
+	if m.MaxConcurrency < 1 {
+		add(base+".max_concurrency", "must be at least 1")
+	}
+	if m.QueueSize < 0 {
+		add(base+".queue_size", "must not be negative")
+	}
+	if m.QueueTimeout <= 0 {
+		add(base+".queue_timeout", "must be positive")
 	}
 }
 

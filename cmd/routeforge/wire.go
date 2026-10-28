@@ -1,9 +1,11 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 
+	"github.com/omorsi45/routeforge/internal/accounting"
 	"github.com/omorsi45/routeforge/internal/config"
 	"github.com/omorsi45/routeforge/internal/executor"
 	"github.com/omorsi45/routeforge/internal/provider"
@@ -57,4 +59,50 @@ func buildTargets(cfg *config.Config, providers map[string]provider.Provider) ma
 		targets[m.Name] = executor.Target{Model: m.Name, Upstream: m.UpstreamModel, Provider: providers[m.Provider]}
 	}
 	return targets
+}
+
+// modelPrices prices every configured model, keyed by its configured name. A
+// model that sets both input_per_mtok and output_per_mtok uses them; any
+// other model takes the price file entry for its policy_name. A model with
+// neither is an error naming it, and so are all the other problems found. A
+// pricing.file that is set is always loaded, even when every model carries
+// its own prices.
+func modelPrices(cfg *config.Config) (map[string]accounting.Price, error) {
+	var table *accounting.PriceTable
+	if cfg.Pricing.File != "" {
+		t, err := accounting.LoadPrices(cfg.Pricing.File)
+		if err != nil {
+			return nil, err
+		}
+		table = t
+	}
+
+	prices := make(map[string]accounting.Price, len(cfg.Models))
+	var errs []error
+	for _, m := range cfg.Models {
+		if m.InputPerMTok != nil && m.OutputPerMTok != nil {
+			p, err := accounting.NewPrice(m.Name, *m.InputPerMTok, *m.OutputPerMTok)
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			prices[m.Name] = p
+			continue
+		}
+		if table == nil {
+			errs = append(errs, fmt.Errorf("model %q: no price: set input_per_mtok and output_per_mtok or pricing.file", m.Name))
+			continue
+		}
+		p, ok := table.Price(m.PolicyName)
+		if !ok {
+			errs = append(errs, fmt.Errorf("model %q: policy_name %q is not in the price file", m.Name, m.PolicyName))
+			continue
+		}
+		p.Name = m.Name
+		prices[m.Name] = p
+	}
+	if err := errors.Join(errs...); err != nil {
+		return nil, err
+	}
+	return prices, nil
 }
