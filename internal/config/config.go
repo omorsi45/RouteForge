@@ -44,7 +44,7 @@ type Config struct {
 }
 
 // Reliability holds the retry and circuit breaker settings. Unset fields take
-// the defaults of spec section 10.
+// the defaults listed under "reliability" in docs/operations.md.
 type Reliability struct {
 	MaxAttempts int           `yaml:"max_attempts"` // tries per request, the first included
 	BackoffBase time.Duration `yaml:"backoff_base"`
@@ -52,7 +52,7 @@ type Reliability struct {
 
 	// Retries are allowed while they number fewer than RetryBudgetRatio times
 	// the requests in the last RetryBudgetWindow plus RetryBudgetMin (the
-	// floor, Ruling R5, lets an isolated request fail over).
+	// floor lets an isolated request fail over).
 	RetryBudgetRatio  float64       `yaml:"retry_budget_ratio"`
 	RetryBudgetWindow time.Duration `yaml:"retry_budget_window"`
 	RetryBudgetMin    int           `yaml:"retry_budget_min"`
@@ -89,7 +89,7 @@ type Pricing struct {
 	File string `yaml:"file"`
 }
 
-// Fail modes of the accounting backends, spec section 11.
+// Fail modes of the accounting backends.
 const (
 	// FailModeClosed refuses a request when a budget or limiter backend cannot
 	// be reached. It is the default.

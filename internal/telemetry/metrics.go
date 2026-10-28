@@ -36,9 +36,10 @@ type StateSources struct {
 	InFlight func() int
 }
 
-// Metrics is the gateway's set of Prometheus series (spec 14 and 11), on a
-// registry of its own. Every method is safe to call on a nil *Metrics, where it
-// does nothing, so a package takes an optional *Metrics without checking it.
+// Metrics is the gateway's set of Prometheus series (listed under "Metrics" in
+// docs/operations.md), on a registry of its own. Every method is safe to call
+// on a nil *Metrics, where it does nothing, so a package takes an optional
+// *Metrics without checking it.
 // Methods are safe for concurrent use.
 type Metrics struct {
 	reg *prometheus.Registry

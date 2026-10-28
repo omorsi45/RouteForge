@@ -598,7 +598,7 @@ func TestPolicyRawBytesRoundTrip(t *testing.T) {
 	}
 
 	// The jsonb column is queryable but not the source of truth: it rewrites
-	// the text, which would change the version hash (Ruling R9).
+	// the text, which would change the version hash.
 	var artifactText, artifactVersion string
 	scanOne(t, s, `select artifact::text, artifact->>'version' from policies where version = $1`, []any{p.Version}, &artifactText, &artifactVersion)
 	if artifactVersion != p.Version {

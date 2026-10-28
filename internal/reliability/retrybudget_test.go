@@ -7,8 +7,10 @@ import (
 	"time"
 )
 
-// specBudget is the default retry budget of spec 10 with the floor of Ruling R5.
-func specBudget() (*RetryBudget, *fakeClock) {
+// defaultRetryBudget is the retry budget with the documented defaults: 0.2
+// retries per request over 10 seconds, plus a floor of 3 so that an isolated
+// request can still fail over (docs/operations.md, "Reliability").
+func defaultRetryBudget() (*RetryBudget, *fakeClock) {
 	clk := newFakeClock()
 	return NewRetryBudget(0.2, 10*time.Second, 3, clk.Now), clk
 }
@@ -33,14 +35,14 @@ func recordRequests(r *RetryBudget, n int) {
 
 func TestRetryBudgetFloorAndRatio(t *testing.T) {
 	t.Run("no requests still allow the floor", func(t *testing.T) {
-		r, _ := specBudget()
+		r, _ := defaultRetryBudget()
 		if got := drain(r); got != 3 {
 			t.Fatalf("retries with 0 requests = %d, want 3", got)
 		}
 	})
 
 	t.Run("one hundred requests allow twenty three", func(t *testing.T) {
-		r, _ := specBudget()
+		r, _ := defaultRetryBudget()
 		recordRequests(r, 100)
 		if got := drain(r); got != 23 {
 			t.Fatalf("retries with 100 requests = %d, want floor(0.2*100)+3 = 23", got)
@@ -48,7 +50,7 @@ func TestRetryBudgetFloorAndRatio(t *testing.T) {
 	})
 
 	t.Run("the ratio is floored", func(t *testing.T) {
-		r, _ := specBudget()
+		r, _ := defaultRetryBudget()
 		recordRequests(r, 14) // floor(2.8) + 3
 		if got := drain(r); got != 5 {
 			t.Fatalf("retries with 14 requests = %d, want 5", got)
@@ -56,7 +58,7 @@ func TestRetryBudgetFloorAndRatio(t *testing.T) {
 	})
 
 	t.Run("later requests raise the allowance", func(t *testing.T) {
-		r, _ := specBudget()
+		r, _ := defaultRetryBudget()
 		if got := drain(r); got != 3 {
 			t.Fatalf("first drain = %d, want 3", got)
 		}
@@ -67,7 +69,7 @@ func TestRetryBudgetFloorAndRatio(t *testing.T) {
 	})
 
 	t.Run("a refused retry is not counted", func(t *testing.T) {
-		r, _ := specBudget()
+		r, _ := defaultRetryBudget()
 		drain(r)
 		for range 5 {
 			if r.TryRetry() {
@@ -83,7 +85,7 @@ func TestRetryBudgetFloorAndRatio(t *testing.T) {
 
 func TestRetryBudgetWindowSlides(t *testing.T) {
 	t.Run("a full window frees the whole budget", func(t *testing.T) {
-		r, clk := specBudget()
+		r, clk := defaultRetryBudget()
 		recordRequests(r, 100)
 		if got := drain(r); got != 23 {
 			t.Fatalf("drain = %d, want 23", got)
@@ -95,7 +97,7 @@ func TestRetryBudgetWindowSlides(t *testing.T) {
 	})
 
 	t.Run("nothing is freed inside the window", func(t *testing.T) {
-		r, clk := specBudget()
+		r, clk := defaultRetryBudget()
 		drain(r)
 		clk.Advance(9 * time.Second)
 		if r.TryRetry() {
@@ -104,7 +106,7 @@ func TestRetryBudgetWindowSlides(t *testing.T) {
 	})
 
 	t.Run("requests leave while their retries stay", func(t *testing.T) {
-		r, clk := specBudget()
+		r, clk := defaultRetryBudget()
 		recordRequests(r, 50) // allowance floor(10) + 3 = 13
 		clk.Advance(6 * time.Second)
 		recordRequests(r, 50) // 100 requests in the window: 23
@@ -118,7 +120,7 @@ func TestRetryBudgetWindowSlides(t *testing.T) {
 	})
 
 	t.Run("retries leave while their requests stay", func(t *testing.T) {
-		r, clk := specBudget()
+		r, clk := defaultRetryBudget()
 		if got := drain(r); got != 3 {
 			t.Fatalf("first drain = %d, want 3", got)
 		}
@@ -132,7 +134,7 @@ func TestRetryBudgetWindowSlides(t *testing.T) {
 }
 
 func TestRetryBudgetConcurrent(t *testing.T) {
-	r, _ := specBudget()
+	r, _ := defaultRetryBudget()
 	var (
 		granted atomic.Int32
 		wg      sync.WaitGroup

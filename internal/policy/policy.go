@@ -14,7 +14,9 @@ type Model struct {
 	ExpectedOutputTokens float64
 }
 
-// Profile is one certified routing profile (spec 8.5).
+// Profile is one routing profile with its certified threshold: the target
+// regret rate Alpha, the confidence Delta, the Lambda that the trainer
+// certified, and the certification evidence behind it.
 type Profile struct {
 	Name       string
 	Alpha      float64

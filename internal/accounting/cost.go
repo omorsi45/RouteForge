@@ -16,7 +16,7 @@ const nanosPerUSD = 1e9
 const maxUSDNanos = 1 << 50
 
 // EstimateTokens estimates the tokens in bytes bytes of text: one token per
-// four bytes, rounded up (spec 11).
+// four bytes, rounded up.
 func EstimateTokens(bytes int) int { return (bytes + 3) / 4 }
 
 // CostNanos is the cost in nano-USD of promptTokens input tokens and
@@ -27,7 +27,7 @@ func CostNanos(p Price, promptTokens, completionTokens int) int64 {
 
 // ReservationNanos is what a request holds back before its call: every prompt
 // byte priced as a token, which can only overstate the prompt, plus the whole
-// output cap at the output price (spec 11).
+// output cap at the output price.
 func ReservationNanos(p Price, promptBytes, maxOutputTokens int) int64 {
 	return int64(promptBytes)*p.InNanos + int64(maxOutputTokens)*p.OutNanos
 }

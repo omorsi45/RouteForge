@@ -1608,8 +1608,9 @@ func TestHealthObservedOnSuccessOnly(t *testing.T) {
 }
 
 // A provider that sends no usage still decoded something, so the estimators
-// are told the spec 11 estimate of the output, not zero tokens: with 0 the whole
-// decode time would be charged to one token and inflate the per-token latency.
+// are told the estimate of the output (one token per four bytes delivered), not
+// zero tokens: with 0 the whole decode time would be charged to one token and
+// inflate the per-token latency.
 func TestHealthObservedWithEstimatedTokensWhenUsageMissing(t *testing.T) {
 	// Longer than the TTFT prior, so a response's decode time is not zero and the
 	// token count shows in the prediction.

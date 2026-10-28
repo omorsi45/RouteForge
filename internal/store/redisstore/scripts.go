@@ -99,9 +99,10 @@ return 1
 `)
 
 // settleScript returns a reservation, charges the actual cost and adds the
-// overshoot of this charge, max(0, spent_after - max(limit, spent_before))
-// (Ruling R7), like MemoryBudgets.Settle. A limit near the int64 maximum, which
-// the accountant uses for a tenant without a budget, is not exact as a double
+// overshoot of this charge, max(0, spent_after - max(limit, spent_before)),
+// like MemoryBudgets.Settle, so that over a day spend minus budget equals the
+// overshoot exactly. A limit near the int64 maximum, which the accountant uses
+// for a tenant without a budget, is not exact as a double
 // and does not need to be: no spend gets near it.
 //
 //	KEYS[1]  budget hash (fields spent, reserved, overshoot)

@@ -1,7 +1,8 @@
-"""The served policy artifact (spec 9): document, export, validation, loading and scoring.
+"""The served policy artifact: document, export, validation, loading and scoring.
 
 `validate_policy_doc` is the contract the Go gateway must enforce when it loads an artifact;
-every failure names the JSON path of the offending value.
+every failure names the JSON path of the offending value. The file is described in
+docs/architecture.md, "From the trainer to the gateway".
 """
 
 from __future__ import annotations
@@ -97,7 +98,7 @@ def policy_version(doc: Mapping[str, Any]) -> str:
 
 
 def policy_doc(policy: Policy) -> dict[str, Any]:
-    """The full spec 9 document, with `version` filled in."""
+    """The full policy document, with `version` filled in."""
     doc: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "created_at": policy.created_at,

@@ -261,7 +261,7 @@ func TestReplayParityThreshold(t *testing.T) {
 
 // wantLatencyNote is the text every replay result carries about the latency
 // strategy.
-const wantLatencyNote = "The gateway's latency strategy adapts its estimates to observed attempts (spec 8.6); " +
+const wantLatencyNote = "The gateway's latency strategy adapts its estimates to observed attempts; " +
 	"the offline latency router uses the SIMULATED priors only, so its agreement is reported but not part of the parity check."
 
 func TestReplayLatencyDisagreementDoesNotFailParity(t *testing.T) {

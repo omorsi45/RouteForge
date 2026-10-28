@@ -270,7 +270,6 @@ func TestNumbersComeFromTheInputs(t *testing.T) {
 	in.LoadProfiled.Results.OverheadTarget.P95MSBelow = 50
 	in.Replay.Params.ParityThreshold = 0.5
 	in.Evaluation.Notes = []string{"first note", "second note", "third note"}
-	in.Replay.Results.LatencyNote = "another latency note"
 
 	docs, err := RenderBenchmarks(in)
 	if err != nil {
@@ -282,7 +281,7 @@ func TestNumbersComeFromTheInputs(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Target of 40.0% or more", "p95 gateway overhead < 50 ms", "threshold 0.500",
-		"first note", "second note", "third note", "another latency note",
+		"first note", "second note", "third note",
 	} {
 		if !strings.Contains(docs, want) {
 			t.Errorf("benchmarks.md lacks %q", want)
@@ -297,6 +296,25 @@ func TestNumbersComeFromTheInputs(t *testing.T) {
 		if !strings.Contains(readme, want) {
 			t.Errorf("the README block lacks %q", want)
 		}
+	}
+}
+
+// The latency note is fixed text about the method, not a measurement. Whatever
+// latency_note a result file holds, the report prints ReplayLatencyNote, so the
+// committed documents keep reading the same when the wording changes.
+func TestReplayLatencyNoteIsRenderedFromTheConstant(t *testing.T) {
+	in := loadGolden(t)
+	in.Replay.Results.LatencyNote = "a note that an older run wrote"
+
+	docs, err := RenderBenchmarks(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(docs, ReplayLatencyNote) {
+		t.Errorf("benchmarks.md lacks the replay latency note %q", ReplayLatencyNote)
+	}
+	if strings.Contains(docs, in.Replay.Results.LatencyNote) {
+		t.Errorf("benchmarks.md prints the result file's latency note %q", in.Replay.Results.LatencyNote)
 	}
 }
 
@@ -461,6 +479,8 @@ func TestLoadReportInputsRejects(t *testing.T) {
 			[]string{"faults.json", "schema_version"}},
 		{"a missing field", reportRunID, one("replay.json", remove(`"parity_pass": true,`)),
 			[]string{"replay.json", "results", "parity_pass"}},
+		{"a missing latency note", reportRunID, one("replay.json", remove(`"latency_note": "The latency group is reported and not checked.",`)),
+			[]string{"replay.json", "results", "latency_note"}},
 		{"a missing field of a strategy", reportRunID, one("replay.json", remove(`"agreement": 0.97,`)),
 			[]string{"replay.json", "latency", "agreement"}},
 		{"a missing field of a mismatch", reportRunID, one("replay.json", remove(`"offline": "model-b",`)),

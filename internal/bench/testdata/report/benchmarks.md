@@ -93,7 +93,7 @@ Each prompt of the test split (100 prompts) is sent through the gateway once for
 - Overall agreement: 0.996
 - Parity: pass
 
-The latency group is reported and not checked.
+The gateway's latency strategy adapts its estimates to observed attempts; the offline latency router uses the SIMULATED priors only, so its agreement is reported but not part of the parity check.
 
 ## Gateway load
 

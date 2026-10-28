@@ -9,7 +9,7 @@ import (
 // RetryBudget caps how many retries the gateway adds on top of its traffic, so
 // that failing providers are not hit harder just when they struggle. Within a
 // sliding window it allows floor(ratio * requests) + a fixed floor retries; the
-// floor (Ruling R5) lets an isolated request still fail over. It is safe for
+// floor lets an isolated request still fail over. It is safe for
 // concurrent use.
 type RetryBudget struct {
 	ratio      float64

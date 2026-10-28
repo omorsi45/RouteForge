@@ -1,4 +1,4 @@
-"""Keyword-rule baseline (spec 8.2): unigram keywords per family, cheapest adequate model.
+"""Keyword-rule baseline: unigram keywords per family, cheapest adequate model.
 
 Evaluated offline only, never served; Go reproduces `classify` from the exported rules.
 """

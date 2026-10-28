@@ -253,7 +253,7 @@ func TestExplainReturnsDecisionWithoutCallingProvider(t *testing.T) {
 		t.Errorf("attempts = %+v, want none", d.Attempts)
 	}
 
-	// The decision is returned, not stored (Ruling R10).
+	// The decision is returned, not stored.
 	if n := spy.puts.Load(); n != 0 {
 		t.Errorf("explain stored %d decisions, want 0", n)
 	}

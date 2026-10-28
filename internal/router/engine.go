@@ -264,7 +264,8 @@ func (e *Engine) Decide(ctx context.Context, req *Request) (*Decision, error) {
 	} else {
 		err = e.routePinned(ctx, req, d)
 	}
-	// Only these two errors come with a decision (Ruling C8).
+	// Only these two errors come with a decision, which lists every candidate's
+	// reasons.
 	if err != nil && !errors.Is(err, ErrNoEligibleModel) && !errors.Is(err, ErrOverloaded) {
 		annotateDecideSpan(span, req, nil, err)
 		return nil, err
@@ -366,8 +367,8 @@ func (e *Engine) routePinned(ctx context.Context, req *Request, d *Decision) err
 	d.Candidates = append(d.Candidates, o.candidate())
 	if !o.eligible() {
 		// A pinned request has one candidate, so a full queue as its only
-		// reason is the overload of spec 10: the model is fine and the gateway
-		// is busy. Any other reason, or a second one, leaves the request
+		// reason is an overload: the model is fine and the gateway is busy.
+		// Any other reason, or a second one, leaves the request
 		// without an eligible model.
 		sentinel := ErrNoEligibleModel
 		if slices.Equal(o.reasons, []string{IneligibleQueueFull}) {
@@ -458,13 +459,12 @@ func (e *Engine) options(ev *evaluation, pol *policy.Policy, scores []policy.Sco
 	return opts
 }
 
-// chooseQuality applies the quality rule (spec 8.4) to the eligible
-// candidates, which are in pool order. Candidates are stably sorted by
-// expected cost, so equal costs keep pool order, like the trainer's
-// route_quality. The first with lcb >= lambda wins; with none, the policy's
-// strongest model wins when eligible, else the eligible candidate with the
-// highest p. Fallbacks are the other passing candidates by cost, then the
-// rest by descending p.
+// chooseQuality applies the quality rule to the eligible candidates, which are
+// in pool order. Candidates are stably sorted by expected cost, so equal costs
+// keep pool order, like the trainer's route_quality. The first with
+// lcb >= lambda wins; with none, the policy's strongest model wins when
+// eligible, else the eligible candidate with the highest p. Fallbacks are the
+// other passing candidates by cost, then the rest by descending p.
 func chooseQuality(pol *policy.Policy, eligible []*option, lambda float64) (chosen *option, reason string, fallbacks []*option) {
 	byCost := slices.Clone(eligible)
 	slices.SortStableFunc(byCost, func(a, b *option) int { return cmp.Compare(a.cost, b.cost) })
@@ -489,8 +489,8 @@ func chooseQuality(pol *policy.Policy, eligible []*option, lambda float64) (chos
 
 // chooseByStrategy serves the reference strategies. The strategy picks among
 // all candidates; when its pick is ineligible the eligible candidate with the
-// highest p is chosen instead (Ruling R4). Fallbacks are the other eligible
-// candidates by descending p.
+// highest p is chosen instead. Fallbacks are the other eligible candidates by
+// descending p.
 func chooseByStrategy(strategy string, pol *policy.Policy, text string, opts, eligible []*option) (chosen *option, reason string, fallbacks []*option) {
 	var pick *option
 	switch strategy {

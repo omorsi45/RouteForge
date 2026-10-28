@@ -1,4 +1,4 @@
-"""Per-model gradient boosting predictor (spec 8.2).
+"""Per-model gradient boosting predictor (docs/routing.md, "Predictors").
 
 Trees are exported as flat arrays over global feature ids. Serving compares
 `float64(float32(x)) <= threshold`, because scikit-learn evaluates trees on float32 inputs.

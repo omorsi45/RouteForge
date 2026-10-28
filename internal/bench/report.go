@@ -822,7 +822,11 @@ func replayBlocks(f *ReplayFile) []string {
 		fmt.Sprintf("- Overall agreement: %s", rate(r.OverallAgreement)),
 		fmt.Sprintf("- Parity: %s", passFail(r.ParityPass)),
 	)
-	out.add(r.LatencyNote)
+	// The note is fixed text about the method, not a measurement, so it is
+	// rendered from the constant. The result file still carries (and the loader
+	// still requires) latency_note, which an older run may have worded
+	// differently.
+	out.add(ReplayLatencyNote)
 	return out
 }
 

@@ -335,7 +335,8 @@ func (s *Server) serveJSON(w http.ResponseWriter, r *http.Request, st *chatState
 func upstreamTime(d *router.Decision) time.Duration {
 	var total time.Duration
 	for _, a := range d.Attempts {
-		// DurationMS has microsecond resolution (Ruling R8).
+		// DurationMS has microsecond resolution so that sub-millisecond
+		// gateway overhead can be measured.
 		total += time.Duration(math.Round(a.DurationMS*1000)) * time.Microsecond
 	}
 	return total
