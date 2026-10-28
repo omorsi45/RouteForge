@@ -388,7 +388,7 @@ What to know when reading the benchmark results:
 
 ## Known limits
 
-- The PostgreSQL writer retries a failed batch three times with a doubling wait (100 ms base) and then drops it with an error log. During a long outage usage rows can be lost, and then spend no longer equals the sum of usage records.
+- The PostgreSQL writer never drops a row while the gateway is running. A batch that fails to write stays at the head of the queue and is tried again after a wait that starts at 100 ms, doubles and is capped at 5 seconds, so settled spend keeps equalling the sum of usage records. A long outage fills the queue to `accounting.usage_queue`, and admission then fails with 503 `accounting_unavailable` until the database is back. Only the rows still queued when the shutdown deadline passes are lost, and the gateway logs how many.
 - Incoming `traceparent` headers are not continued.
 - Configuration is read once. A change needs a restart.
 - Breakers, latency estimates and queues are per replica. Only budgets and rate limits are shared, and only through Redis.

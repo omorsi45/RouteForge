@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -66,6 +67,35 @@ func (r *recorder) callTimes() []time.Time {
 	return slices.Clone(r.at)
 }
 
+// offsets returns when each call ran, counted from start.
+func (r *recorder) offsets(start time.Time) []time.Duration {
+	var out []time.Duration
+	for _, at := range r.callTimes() {
+		out = append(out, at.Sub(start))
+	}
+	return out
+}
+
+// gaps returns the waits between consecutive calls.
+func (r *recorder) gaps() []time.Duration {
+	times := r.callTimes()
+	var out []time.Duration
+	for i := 1; i < len(times); i++ {
+		out = append(out, times[i].Sub(times[i-1]))
+	}
+	return out
+}
+
+// failUntil makes the first n calls fail.
+func failUntil(n int) func(call int) error {
+	return func(call int) error {
+		if call <= n {
+			return errors.New("connection refused")
+		}
+		return nil
+	}
+}
+
 // syncBuf is a goroutine-safe log sink.
 type syncBuf struct {
 	mu  sync.Mutex
@@ -82,6 +112,13 @@ func (b *syncBuf) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buf.String()
+}
+
+// queuedRows is how many rows are pending or being written.
+func queuedRows(b *batcher[int]) int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.pending) + b.inflight
 }
 
 func mustAdd(t *testing.T, b *batcher[int], rows ...int) {
@@ -236,9 +273,84 @@ func TestBatchCloseGivesUpWhenItsContextEnds(t *testing.T) {
 		if got := b.Dropped(); got != 3 {
 			t.Errorf("Dropped = %d, want the 3 rows that were never written", got)
 		}
-		if !strings.Contains(logs.String(), `"rows":`) {
-			t.Errorf("the dropped rows were not logged: %s", logs.String())
+		if !strings.Contains(logs.String(), `"rows":3`) {
+			t.Errorf("the dropped rows were not logged with their count: %s", logs.String())
 		}
+	})
+}
+
+func TestBatchCloseWithAnExpiredContextDropsTheQueuedRows(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		logs := &syncBuf{}
+		rec := &recorder{fail: failUntil(1 << 30)}
+		b := newBatcher(batcherOptions{
+			BatchSize: 500, FlushInterval: time.Hour, QueueSize: 100,
+			Logger: slog.New(slog.NewJSONHandler(logs, nil)),
+		}, rec.flush)
+		mustAdd(t, b, 1, 2, 3)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		err := b.Close(ctx)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Close = %v, want the context's error", err)
+		}
+		if got := b.Dropped(); got != 3 {
+			t.Errorf("Dropped = %d, want the 3 queued rows", got)
+		}
+		if got := rec.calls(); got != 0 {
+			t.Errorf("flush ran %d times for a context that had ended, want 0", got)
+		}
+		if !strings.Contains(logs.String(), `"rows":3`) {
+			t.Errorf("the dropped rows were not logged with their count: %s", logs.String())
+		}
+		if b.Full() {
+			t.Error("Full after the queued rows were dropped")
+		}
+	})
+}
+
+func TestBatchCloseKeepsTryingUntilItsContextEnds(t *testing.T) {
+	t.Run("the rows are written when the database comes back in time", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			rec := &recorder{fail: failUntil(3)}
+			b := newBatcher(batcherOptions{BatchSize: 500, FlushInterval: time.Hour, QueueSize: 100}, rec.flush)
+			mustAdd(t, b, 1, 2, 3)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := b.Close(ctx); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			assertBatches(t, "Close", rec, []int{1, 2, 3})
+			if got := b.Dropped(); got != 0 {
+				t.Errorf("Dropped = %d, want 0", got)
+			}
+		})
+	})
+
+	t.Run("the rows left when it ends are dropped and counted", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			rec := &recorder{fail: failUntil(1 << 30)}
+			b := newBatcher(batcherOptions{BatchSize: 500, FlushInterval: time.Hour, QueueSize: 100}, rec.flush)
+			mustAdd(t, b, 1, 2, 3)
+
+			start := time.Now()
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			err := b.Close(ctx)
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("Close = %v, want the context's deadline error", err)
+			}
+			want := []time.Duration{0, 100 * time.Millisecond, 300 * time.Millisecond, 700 * time.Millisecond}
+			if got := rec.offsets(start); !slices.Equal(got, want) {
+				t.Errorf("tries at %v, want %v (backoff 100ms, 200ms, 400ms, then 800ms would pass the deadline)", got, want)
+			}
+			if got := b.Dropped(); got != 3 {
+				t.Errorf("Dropped = %d, want 3", got)
+			}
+			assertBatches(t, "the failed Close", rec)
+		})
 	})
 }
 
@@ -287,82 +399,196 @@ func TestBatchFullReports(t *testing.T) {
 	})
 }
 
-func TestBatchRetriesThenLogs(t *testing.T) {
-	t.Run("a flush that keeps failing is retried three times, then dropped and logged", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
-			logs := &syncBuf{}
-			boom := errors.New("connection refused")
-			rec := &recorder{fail: func(int) error { return boom }}
-			b := newBatcher(batcherOptions{
-				BatchSize: 2, FlushInterval: time.Hour, QueueSize: 100,
-				Logger: slog.New(slog.NewJSONHandler(logs, nil)),
-			}, rec.flush)
-			defer func() { _ = b.Close(context.Background()) }()
+func TestBatchFailedBatchStaysQueuedUntilWritten(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		rec := &recorder{fail: failUntil(6)}
+		b := newBatcher(batcherOptions{BatchSize: 2, FlushInterval: time.Hour, QueueSize: 100,
+			Logger: slog.New(slog.DiscardHandler)}, rec.flush)
+		defer func() { _ = b.Close(context.Background()) }()
 
-			start := time.Now()
-			mustAdd(t, b, 1, 2)
-			time.Sleep(time.Minute)
-			synctest.Wait()
+		start := time.Now()
+		mustAdd(t, b, 1, 2, 3, 4, 5)
+		time.Sleep(time.Minute)
+		synctest.Wait()
 
-			if got := rec.calls(); got != 4 {
-				t.Fatalf("flush ran %d times, want 1 try and 3 retries", got)
-			}
-			var offsets []time.Duration
-			for _, at := range rec.callTimes() {
-				offsets = append(offsets, at.Sub(start))
-			}
-			want := []time.Duration{0, 100 * time.Millisecond, 300 * time.Millisecond, 700 * time.Millisecond}
-			if !slices.Equal(offsets, want) {
-				t.Errorf("tries at %v, want %v (backoff 100ms, 200ms, 400ms)", offsets, want)
-			}
-			if got := b.Dropped(); got != 2 {
-				t.Errorf("Dropped = %d, want 2", got)
-			}
-			out := logs.String()
-			for _, want := range []string{`"level":"ERROR"`, `"rows":2`, "connection refused"} {
-				if !strings.Contains(out, want) {
-					t.Errorf("log %s does not contain %s", out, want)
-				}
-			}
-			assertBatches(t, "the failures", rec)
-
-			// The queue is free again: the dropped rows no longer count.
-			if b.Full() {
-				t.Error("Full after the rows were dropped")
-			}
-		})
+		// Every row is written exactly once and in the order it was added; the
+		// failed batch went ahead of the rows behind it.
+		assertBatches(t, "the recovery", rec, []int{1, 2}, []int{3, 4}, []int{5})
+		if got := b.Dropped(); got != 0 {
+			t.Errorf("Dropped = %d, want 0: a batcher that is open never drops rows", got)
+		}
+		if got := rec.calls(); got != 9 {
+			t.Errorf("flush ran %d times, want 6 failed tries and 3 batches", got)
+		}
+		want := []time.Duration{0, 100 * time.Millisecond, 300 * time.Millisecond, 700 * time.Millisecond,
+			1500 * time.Millisecond, 3100 * time.Millisecond, 6300 * time.Millisecond}
+		if got := rec.offsets(start)[:len(want)]; !slices.Equal(got, want) {
+			t.Errorf("tries at %v, want %v (backoff 100ms doubling)", got, want)
+		}
+		if b.Full() {
+			t.Error("Full after everything was written")
+		}
 	})
+}
 
-	t.Run("a flush that recovers writes the rows once and logs nothing", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
-			logs := &syncBuf{}
-			rec := &recorder{fail: func(call int) error {
-				if call <= 2 {
-					return errors.New("deadlock detected")
-				}
-				return nil
-			}}
-			b := newBatcher(batcherOptions{
-				BatchSize: 2, FlushInterval: time.Hour, QueueSize: 100,
-				Logger: slog.New(slog.NewJSONHandler(logs, nil)),
-			}, rec.flush)
-			defer func() { _ = b.Close(context.Background()) }()
+func TestBatchRowsAddedDuringAnOutageStayBehindTheFailedBatch(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		rec := &recorder{fail: failUntil(2)}
+		b := newBatcher(batcherOptions{BatchSize: 2, FlushInterval: time.Hour, QueueSize: 100,
+			Logger: slog.New(slog.DiscardHandler)}, rec.flush)
+		defer func() { _ = b.Close(context.Background()) }()
 
-			mustAdd(t, b, 1, 2)
-			time.Sleep(time.Minute)
-			synctest.Wait()
+		mustAdd(t, b, 1, 2) // fails at 0 and at 100 ms, then is written at 300 ms
+		time.Sleep(50 * time.Millisecond)
+		mustAdd(t, b, 3, 4)
+		time.Sleep(time.Minute)
+		synctest.Wait()
 
-			assertBatches(t, "recovery", rec, []int{1, 2})
-			if got := rec.calls(); got != 3 {
-				t.Errorf("flush ran %d times, want 3", got)
+		assertBatches(t, "the recovery", rec, []int{1, 2}, []int{3, 4})
+		if got := b.Dropped(); got != 0 {
+			t.Errorf("Dropped = %d, want 0", got)
+		}
+	})
+}
+
+func TestBatchBackoffDoublesUpToFiveSeconds(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		rec := &recorder{fail: failUntil(10)}
+		b := newBatcher(batcherOptions{BatchSize: 2, FlushInterval: time.Hour, QueueSize: 100,
+			Logger: slog.New(slog.DiscardHandler)}, rec.flush)
+		defer func() { _ = b.Close(context.Background()) }()
+
+		mustAdd(t, b, 1, 2)
+		time.Sleep(time.Minute)
+		synctest.Wait()
+
+		want := []time.Duration{
+			100 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond, 800 * time.Millisecond,
+			1600 * time.Millisecond, 3200 * time.Millisecond,
+			5 * time.Second, 5 * time.Second, 5 * time.Second, 5 * time.Second,
+		}
+		if got := rec.gaps(); !slices.Equal(got, want) {
+			t.Errorf("waits between tries = %v, want %v", got, want)
+		}
+		assertBatches(t, "the recovery", rec, []int{1, 2})
+	})
+}
+
+func TestBatchBackoffStartsOverAfterASuccess(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		rec := &recorder{fail: func(call int) error {
+			if call <= 3 || call == 5 {
+				return errors.New("connection refused")
 			}
-			if got := b.Dropped(); got != 0 {
-				t.Errorf("Dropped = %d, want 0", got)
+			return nil
+		}}
+		b := newBatcher(batcherOptions{BatchSize: 2, FlushInterval: time.Hour, QueueSize: 100,
+			Logger: slog.New(slog.DiscardHandler)}, rec.flush)
+		defer func() { _ = b.Close(context.Background()) }()
+
+		mustAdd(t, b, 1, 2) // tries at 0, 100 and 300 ms fail, the one at 700 ms writes
+		time.Sleep(time.Second)
+		synctest.Wait()
+		assertBatches(t, "the first outage", rec, []int{1, 2})
+
+		mustAdd(t, b, 3, 4) // fails once, a long time after the first outage
+		time.Sleep(time.Minute)
+		synctest.Wait()
+		assertBatches(t, "the second outage", rec, []int{1, 2}, []int{3, 4})
+
+		gaps := rec.gaps()
+		if len(gaps) != 5 {
+			t.Fatalf("flush ran %d times, want 6", len(gaps)+1)
+		}
+		if gaps[4] != 100*time.Millisecond {
+			t.Errorf("the wait after the first failure of the second outage = %v, want 100ms: a success starts the backoff over", gaps[4])
+		}
+	})
+}
+
+func TestBatchLogsEachFailedTryOnce(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		logs := &syncBuf{}
+		rec := &recorder{fail: failUntil(1 << 30)}
+		b := newBatcher(batcherOptions{
+			BatchSize: 2, FlushInterval: time.Hour, QueueSize: 100,
+			Logger: slog.New(slog.NewJSONHandler(logs, nil)),
+		}, rec.flush)
+
+		mustAdd(t, b, 1, 2)
+		time.Sleep(time.Minute)
+		synctest.Wait()
+
+		out := logs.String()
+		// One line per try, and the tries are spaced by the backoff: 17 in the
+		// first minute, not one per row or per signal.
+		if got, want := strings.Count(out, "\n"), rec.calls(); got != want {
+			t.Errorf("%d log lines for %d failed tries, want one for each:\n%s", got, want, out)
+		}
+		if got := rec.calls(); got != 17 {
+			t.Errorf("flush ran %d times in a minute, want 17", got)
+		}
+		for _, want := range []string{`"level":"ERROR"`, `"queued":2`, `"retry_in"`, "connection refused"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("log %s does not contain %s", out, want)
 			}
-			if out := logs.String(); out != "" {
-				t.Errorf("unexpected log output: %s", out)
+		}
+
+		// Closing with an expired context ends the retries and drops the rows.
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_ = b.Close(ctx)
+		if got := b.Dropped(); got != 2 {
+			t.Errorf("Dropped = %d, want 2", got)
+		}
+	})
+}
+
+func TestBatchOutageFillsTheQueueWithoutLosingRows(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var down atomic.Bool
+		down.Store(true)
+		rec := &recorder{fail: func(int) error {
+			if down.Load() {
+				return errors.New("connection refused")
 			}
-		})
+			return nil
+		}}
+		b := newBatcher(batcherOptions{BatchSize: 2, FlushInterval: 200 * time.Millisecond, QueueSize: 4,
+			Logger: slog.New(slog.DiscardHandler)}, rec.flush)
+		defer func() { _ = b.Close(context.Background()) }()
+
+		mustAdd(t, b, 1, 2, 3)
+		time.Sleep(time.Minute)
+		synctest.Wait()
+		if b.Full() {
+			t.Fatal("full with 3 of 4 rows")
+		}
+
+		mustAdd(t, b, 4)
+		if !b.Full() {
+			t.Fatal("not full with 4 of 4 rows queued")
+		}
+		time.Sleep(10 * time.Minute)
+		synctest.Wait()
+		if !b.Full() {
+			t.Fatal("no longer full after a long outage: rows were lost")
+		}
+		if got := b.Dropped(); got != 0 {
+			t.Errorf("Dropped = %d, want 0", got)
+		}
+		if err := b.TryAdd(5); !errors.Is(err, errQueueFull) {
+			t.Errorf("TryAdd on a full queue = %v, want errQueueFull", err)
+		}
+		assertBatches(t, "the outage", rec)
+
+		down.Store(false)
+		time.Sleep(10 * time.Second)
+		synctest.Wait()
+		assertBatches(t, "the recovery", rec, []int{1, 2}, []int{3, 4})
+		if b.Full() {
+			t.Error("still full after everything was written")
+		}
 	})
 }
 
@@ -390,42 +616,42 @@ func TestBatchFlushWritesEverythingPending(t *testing.T) {
 	})
 }
 
-func TestBatchFlushReturnsTheFailure(t *testing.T) {
+func TestBatchFlushReturnsTheFailureAndKeepsTheRows(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		boom := errors.New("server closed the connection")
-		rec := &recorder{fail: func(int) error { return boom }}
-		b := newBatcher(batcherOptions{BatchSize: 500, FlushInterval: time.Hour, QueueSize: 100}, rec.flush)
+		var down atomic.Bool
+		down.Store(true)
+		rec := &recorder{fail: func(int) error {
+			if down.Load() {
+				return boom
+			}
+			return nil
+		}}
+		b := newBatcher(batcherOptions{BatchSize: 500, FlushInterval: time.Hour, QueueSize: 100,
+			Logger: slog.New(slog.DiscardHandler)}, rec.flush)
 		defer func() { _ = b.Close(context.Background()) }()
 
 		mustAdd(t, b, 1, 2)
 		if err := b.Flush(context.Background()); !errors.Is(err, boom) {
 			t.Fatalf("Flush = %v, want the flush error", err)
 		}
-		if got := b.Dropped(); got != 2 {
-			t.Errorf("Dropped = %d, want 2", got)
+		if got := b.Dropped(); got != 0 {
+			t.Errorf("Dropped = %d, want 0: a failed Flush drops nothing", got)
 		}
-	})
-}
+		if got := queuedRows(b); got != 2 {
+			t.Errorf("%d rows are queued after the failed Flush, want its 2 rows", got)
+		}
 
-func TestBatchKeepsRowsThatWaitAfterAFailure(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		rec := &recorder{fail: func(call int) error {
-			if call <= 4 { // the whole first batch: one try and three retries
-				return errors.New("down")
-			}
-			return nil
-		}}
-		b := newBatcher(batcherOptions{BatchSize: 2, FlushInterval: 200 * time.Millisecond, QueueSize: 100,
-			Logger: slog.New(slog.DiscardHandler)}, rec.flush)
-		defer func() { _ = b.Close(context.Background()) }()
-
-		mustAdd(t, b, 1, 2, 3) // [1 2] fails and is dropped; 3 was never part of it
-		time.Sleep(10 * time.Second)
+		// The database is back: the worker writes the rows, and a Flush after that
+		// has nothing left to write twice.
+		down.Store(false)
+		time.Sleep(time.Minute)
 		synctest.Wait()
-		assertBatches(t, "the outage", rec, []int{3})
-		if got := b.Dropped(); got != 2 {
-			t.Errorf("Dropped = %d, want only the 2 rows of the failed batch", got)
+		assertBatches(t, "the recovery", rec, []int{1, 2})
+		if err := b.Flush(context.Background()); err != nil {
+			t.Fatalf("Flush after the recovery: %v", err)
 		}
+		assertBatches(t, "the Flush after the recovery", rec, []int{1, 2})
 	})
 }
 

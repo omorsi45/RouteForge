@@ -112,8 +112,10 @@ func Open(ctx context.Context, dsn string, o Options) (*Store, error) {
 	return s, nil
 }
 
-// Close writes the rows still queued, within closeTimeout, and closes the
-// connections. It is safe to call more than once. Failures are logged.
+// Close writes the rows still queued and closes the connections. It keeps
+// trying while the database is down, until closeTimeout; the rows still queued
+// then are dropped and logged with their count. It is safe to call more than
+// once. Failures are logged.
 func (s *Store) Close() {
 	s.closeOnce.Do(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)

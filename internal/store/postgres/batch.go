@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,10 +17,11 @@ const (
 	defaultFlushInterval = 200 * time.Millisecond
 	defaultQueueSize     = 10000
 
-	// flushRetries is how many times a failed flush is tried again. The waits
-	// before the retries are retryBase, twice that, and four times that.
-	flushRetries = 3
-	retryBase    = 100 * time.Millisecond
+	// retryBase is the wait before a failed batch is tried again. Each further
+	// failure doubles it, up to retryMax; a successful write starts over at
+	// retryBase.
+	retryBase = 100 * time.Millisecond
+	retryMax  = 5 * time.Second
 	// flushTimeout bounds one try to write a batch.
 	flushTimeout = 10 * time.Second
 )
@@ -49,9 +51,13 @@ type batcherOptions struct {
 // function so that it can be tested without a database. It is safe for
 // concurrent use.
 //
-// A batch that cannot be written is tried again flushRetries times with a
-// doubling wait; after that its rows are dropped, logged and counted, because
-// holding them back would only fill the queue behind an outage.
+// Rows are never dropped while the batcher is open. A batch that cannot be
+// written goes back to the head of the queue, ahead of the rows added after it,
+// and the worker tries it again after a wait that starts at retryBase, doubles
+// with every failure up to retryMax and starts over after a success. A long
+// outage therefore fills the queue until Full reports true, and the caller
+// stops admitting work; it does not lose the rows already queued. Only Close
+// drops rows: those still queued when its context ends.
 type batcher[T any] struct {
 	flush    func(ctx context.Context, rows []T) error
 	size     int
@@ -66,6 +72,7 @@ type batcher[T any] struct {
 	mu       sync.Mutex
 	pending  []T
 	inflight int // rows taken for a batch that is not finished
+	failures int // writes that failed since the last one that succeeded
 	closed   bool
 	timer    *time.Timer // runs when the first pending row has waited too long
 
@@ -139,27 +146,30 @@ func (b *batcher[T]) add(row T, bounded bool) error {
 }
 
 // Full reports that as many rows are pending or being written as the queue
-// holds. Rows count until they are written or dropped.
+// holds. Rows count until they are written, however many times their batch
+// failed, or until Close drops them.
 func (b *batcher[T]) Full() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return len(b.pending)+b.inflight >= b.capacity
 }
 
-// Dropped is how many rows were given up after their batch kept failing.
+// Dropped is how many rows Close gave up because its context ended before they
+// were written. It is 0 while the batcher is open.
 func (b *batcher[T]) Dropped() int64 { return b.dropped.Load() }
 
 // Flush writes every row pending now, one batch at a time, and returns the
-// error of the first batch that failed for good; the rows after it stay
-// pending.
+// error of the first batch that failed. Nothing is dropped: that batch and the
+// rows after it stay queued, in order, and the worker tries them again.
 func (b *batcher[T]) Flush(ctx context.Context) error {
 	return b.flushPending(ctx, true)
 }
 
 // Close stops accepting rows, waits for the batch being written, then writes
-// what is left. When ctx ends first it stops waiting and cancels the writes in
-// progress; the rows not written are dropped and counted, and the error says
-// so. Close is safe to call more than once.
+// what is left, trying again after a failure as the worker does, until ctx
+// ends. The rows still queued then are dropped, counted and logged, and the
+// error says so. When ctx ends while a batch is being written, that write is
+// cancelled. Close is safe to call more than once.
 func (b *batcher[T]) Close(ctx context.Context) error {
 	b.mu.Lock()
 	first := !b.closed
@@ -173,17 +183,21 @@ func (b *batcher[T]) Close(ctx context.Context) error {
 	}
 
 	close(b.stop)
-	var errs []error
 	select {
 	case <-b.done:
 	case <-ctx.Done():
 		b.abort()
-		errs = append(errs, ctx.Err())
 		<-b.done
 	}
-	errs = append(errs, b.flushPending(ctx, true))
+	lastErr := b.drain(ctx)
 	b.abort()
-	return errors.Join(errs...)
+
+	n := b.discard()
+	if n == 0 {
+		return nil
+	}
+	b.log.Error("postgres writer dropped the rows still queued on close", "rows", n)
+	return fmt.Errorf("%d queued rows were not written: %w", n, errors.Join(ctx.Err(), lastErr))
 }
 
 // run is the worker: it writes batches when it is woken.
@@ -194,11 +208,64 @@ func (b *batcher[T]) run() {
 		case <-b.stop:
 			return
 		case <-b.wake:
-			// A failed batch has been logged and counted; the next wake takes up
-			// the rows behind it.
-			_ = b.flushPending(b.base, b.due.Swap(false))
+			if !b.work() {
+				return
+			}
 		}
 	}
+}
+
+// work writes the batches that are due. After a failure it waits out the
+// backoff and tries again, writing whatever is pending, until the queue is
+// written. It reports false when the batcher was stopped meanwhile.
+func (b *batcher[T]) work() bool {
+	all := b.due.Swap(false)
+	for {
+		if d := b.delay(); d > 0 {
+			// A batch failed and went back to the queue: wait before the retry, and
+			// then write all of it, however few rows there are.
+			if !wait(b.stop, d) {
+				return false
+			}
+			all = true
+		}
+		err := b.flushPending(b.base, all)
+		if err == nil {
+			return true
+		}
+		if b.base.Err() != nil {
+			return false // Close cancelled the write; it takes over the queue
+		}
+		b.log.Error("postgres writer could not write a batch; it stays queued and is tried again",
+			"queued", b.queued(), "retry_in", b.delay().String(), "error", err)
+	}
+}
+
+// drain writes the queue for Close, waiting out the backoff between tries,
+// until it is empty or ctx ends. It returns the error of the last failed try.
+func (b *batcher[T]) drain(ctx context.Context) error {
+	var err error
+	for ctx.Err() == nil {
+		if err = b.flushPending(ctx, true); err == nil {
+			return nil
+		}
+		if !wait(ctx.Done(), b.delay()) {
+			break
+		}
+	}
+	return err
+}
+
+// discard drops every queued row and returns how many there were.
+func (b *batcher[T]) discard() int {
+	b.flushMu.Lock() // no write is in progress after this
+	defer b.flushMu.Unlock()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	n := len(b.pending)
+	b.pending = nil
+	b.dropped.Add(int64(n))
+	return n
 }
 
 // signal wakes the worker unless a wake is already waiting.
@@ -223,9 +290,33 @@ func (b *batcher[T]) onTimer() {
 	b.signal()
 }
 
+// queued is how many rows are pending or being written.
+func (b *batcher[T]) queued() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.pending) + b.inflight
+}
+
+// delay is how long to wait before the next try after the writes that failed
+// since the last success: 0 with none, then retryBase, doubling up to retryMax.
+func (b *batcher[T]) delay() time.Duration {
+	b.mu.Lock()
+	n := b.failures
+	b.mu.Unlock()
+	if n == 0 {
+		return 0
+	}
+	d := retryBase
+	for i := 1; i < n && d < retryMax; i++ {
+		d *= 2
+	}
+	return min(d, retryMax)
+}
+
 // flushPending writes pending rows in batches under flushMu. With all it writes
 // every pending row; without, it writes only while a full batch is pending and
-// leaves the rest to the timer.
+// leaves the rest to the timer. It stops at the first batch that fails and
+// returns its error; that batch is back at the head of the queue.
 func (b *batcher[T]) flushPending(ctx context.Context, all bool) error {
 	b.flushMu.Lock()
 	defer b.flushMu.Unlock()
@@ -234,12 +325,10 @@ func (b *batcher[T]) flushPending(ctx context.Context, all bool) error {
 		if len(rows) == 0 {
 			return nil
 		}
-		err := b.write(ctx, rows)
-		b.mu.Lock()
-		b.inflight -= len(rows)
-		b.mu.Unlock()
+		err := b.try(ctx, rows)
+		b.settle(rows, err)
 		if err != nil {
-			return err
+			return fmt.Errorf("write %d rows: %w", len(rows), err)
 		}
 	}
 }
@@ -272,24 +361,21 @@ func (b *batcher[T]) take(all bool) []T {
 	return rows
 }
 
-// write calls flush for rows, trying again after a failure up to flushRetries
-// times. When the last try fails, or ctx ends, the rows are dropped.
-func (b *batcher[T]) write(ctx context.Context, rows []T) error {
-	var err error
-	tries := 0
-	for {
-		tries++
-		if err = b.try(ctx, rows); err == nil {
-			return nil
-		}
-		if tries > flushRetries || ctx.Err() != nil || !wait(ctx, retryBase<<(tries-1)) {
-			break
-		}
+// settle ends the time rows spent in flight. After a failed write they go back
+// to the head of the queue, ahead of the rows added meanwhile, and the worker
+// is woken to try again after the backoff. The rows count as queued throughout.
+func (b *batcher[T]) settle(rows []T, err error) {
+	b.mu.Lock()
+	b.inflight -= len(rows)
+	if err == nil {
+		b.failures = 0
+		b.mu.Unlock()
+		return
 	}
-	b.dropped.Add(int64(len(rows)))
-	b.log.Error("postgres writer dropped rows after repeated failures",
-		"rows", len(rows), "tries", tries, "error", err)
-	return fmt.Errorf("write %d rows: %w", len(rows), err)
+	b.failures++
+	b.pending = slices.Concat(rows, b.pending)
+	b.mu.Unlock()
+	b.signal()
 }
 
 func (b *batcher[T]) try(ctx context.Context, rows []T) error {
@@ -298,14 +384,14 @@ func (b *batcher[T]) try(ctx context.Context, rows []T) error {
 	return b.flush(ctx, rows)
 }
 
-// wait sleeps for d and reports whether it did: false means ctx ended first.
-func wait(ctx context.Context, d time.Duration) bool {
+// wait sleeps for d and reports whether it did: false means done closed first.
+func wait(done <-chan struct{}, d time.Duration) bool {
 	t := time.NewTimer(d)
 	defer t.Stop()
 	select {
 	case <-t.C:
 		return true
-	case <-ctx.Done():
+	case <-done:
 		return false
 	}
 }
