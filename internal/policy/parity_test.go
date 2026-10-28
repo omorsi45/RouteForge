@@ -109,3 +109,63 @@ func TestParityFeatures(t *testing.T) {
 		})
 	}
 }
+
+// TestParityScores scores every fixture row with the committed policy and
+// compares with the trainer: raw scores within 1e-9, standardized dense
+// features within 1e-12, and block index, p, lcb and the static family
+// exactly.
+func TestParityScores(t *testing.T) {
+	const (
+		rawTol   = 1e-9
+		denseTol = 1e-12
+	)
+	p, err := LoadFile(policyFixture)
+	if err != nil {
+		t.Fatalf("LoadFile(%s) error: %v", policyFixture, err)
+	}
+	for _, row := range loadParityRows(t) {
+		t.Run(row.Name, func(t *testing.T) {
+			if p.Version != row.PolicyVersion {
+				t.Fatalf("Version = %q, fixture row was made with %q", p.Version, row.PolicyVersion)
+			}
+			f := Featurize(row.Text)
+
+			z := p.denseZ(&f)
+			if len(row.Dense) != len(z) {
+				t.Fatalf("fixture has %d standardized dense features, want %d", len(row.Dense), len(z))
+			}
+			for i, want := range row.Dense {
+				if d := math.Abs(z[i] - want); d > denseTol {
+					t.Errorf("denseZ[%d] (%s) = %v, want %v (diff %g)", i, DenseNames[i], z[i], want, d)
+				}
+			}
+
+			scores := p.Score(&f)
+			if len(scores) != len(row.Scores) {
+				t.Fatalf("got %d scores, want %d", len(scores), len(row.Scores))
+			}
+			for i, want := range row.Scores {
+				got := scores[i]
+				if got.Model != want.Model {
+					t.Fatalf("scores[%d].Model = %q, want %q", i, got.Model, want.Model)
+				}
+				if d := math.Abs(got.Raw - want.Raw); d > rawTol {
+					t.Errorf("%s: Raw = %v, want %v (diff %g)", got.Model, got.Raw, want.Raw, d)
+				}
+				if got.Block != want.Block {
+					t.Errorf("%s: Block = %d, want %d (raw %v)", got.Model, got.Block, want.Block, got.Raw)
+				}
+				if got.P != want.P {
+					t.Errorf("%s: P = %v, want %v", got.Model, got.P, want.P)
+				}
+				if got.LCB != want.LCB {
+					t.Errorf("%s: LCB = %v, want %v", got.Model, got.LCB, want.LCB)
+				}
+			}
+
+			if got := p.Rules.Classify(row.Text); got != row.StaticFamily {
+				t.Errorf("Classify() = %q, want %q", got, row.StaticFamily)
+			}
+		})
+	}
+}
