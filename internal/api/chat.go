@@ -289,6 +289,9 @@ func (s *Server) serveJSON(w http.ResponseWriter, r *http.Request, st *chatState
 		}
 		return
 	}
+	// The access log and routeforge_requests_total name the model that served,
+	// which differs from the chosen one after a failover.
+	infoFrom(r.Context()).model = res.Model
 	resp := chatResponse{
 		ID:      st.completionID,
 		Object:  "chat.completion",

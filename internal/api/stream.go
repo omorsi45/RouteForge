@@ -123,6 +123,12 @@ func (s *Server) serveStream(w http.ResponseWriter, r *http.Request, st *chatSta
 	})
 	defer finish()
 
+	// From here on the access log and routeforge_requests_total name the model
+	// that serves the stream, which differs from the chosen one after a
+	// failover.
+	info := infoFrom(r.Context())
+	info.model = stream.Model
+
 	rc := http.NewResponseController(w)
 	flush := func() bool {
 		err := rc.Flush()
@@ -136,7 +142,6 @@ func (s *Server) serveStream(w http.ResponseWriter, r *http.Request, st *chatSta
 	h.Set("X-Accel-Buffering", "no")
 	// From here until [DONE] or a terminal error event, a client that leaves
 	// has an incomplete response (the access log's client_gone).
-	info := infoFrom(r.Context())
 	info.streamOpen = true
 	w.WriteHeader(http.StatusOK)
 	if !flush() {

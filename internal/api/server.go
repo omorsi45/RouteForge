@@ -160,8 +160,11 @@ func NewHTTPServer(c config.Server, h http.Handler) *http.Server {
 
 // reqInfo carries per-request values from the handlers back to the access log.
 type reqInfo struct {
-	requestID  string
-	tenant     string
+	requestID string
+	tenant    string
+	// model is the model that served a chat request, once an attempt succeeded.
+	// Until then it is the decision's chosen model, and it stays that when no
+	// attempt succeeded.
 	model      string
 	decisionID string
 	// start is when the access-log middleware began the request.

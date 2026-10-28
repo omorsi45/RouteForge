@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -149,6 +150,84 @@ func TestRequestsTotalLabelsAnAutoRoutedDecision(t *testing.T) {
 	if v := telemetrytest.Value(t, m, "routeforge_requests_total", want); v != 1 {
 		t.Errorf("requests_total%v = %g, want 1; have %+v", want, v, telemetrytest.Gather(t, m)["routeforge_requests_total"].Series)
 	}
+}
+
+func TestServedModelLabelsRequestsAndAccessLog(t *testing.T) {
+	cfg := testConfig()
+	profile := cfg.Tenants[0].Profile
+	down := func(name string) *provider.Error {
+		return &provider.Error{Kind: provider.KindUnavailable, Provider: name, Message: "down"}
+	}
+	// m-fast is the model the decision chooses, and it is down; m-strong is its
+	// fallback.
+	fast := &stubProvider{
+		complete: func(context.Context, provider.Request) (*provider.Response, error) { return nil, down("p-fast") },
+		stream:   func(context.Context, provider.Request) (provider.Stream, error) { return nil, down("p-fast") },
+	}
+	serving := func() *stubProvider {
+		p := streamingProvider(&stubStream{events: []provider.StreamEvent{{Delta: "a"}, {Delta: "b", FinishReason: "stop"}}})
+		p.complete = replyWith("from strong")
+		return p
+	}
+	build := func(t *testing.T, strong *stubProvider) (*Server, *telemetry.Metrics, *accessLog) {
+		t.Helper()
+		m, sink := telemetry.NewMetrics(), &accessLog{}
+		providers := map[string]provider.Provider{"p-fast": fast, "p-strong": strong}
+		srv := newServer(t, cfg, providers, func(o *Options) {
+			o.Metrics = m
+			o.Logger = slog.New(slog.NewJSONHandler(sink, nil))
+			o.Router = chainRouter{chosen: "m-fast", fallbacks: []string{"m-strong"}}
+			o.Executor = executor.NewWithOptions(executor.Options{
+				Targets:     targetsFor(cfg, providers),
+				MaxAttempts: 2,
+				Sleep:       func(context.Context, time.Duration) error { return nil },
+			})
+		})
+		return srv, m, sink
+	}
+	check := func(t *testing.T, m *telemetry.Metrics, sink *accessLog, model string, status int) {
+		t.Helper()
+		want := labels{"model": model, "strategy": "pinned", "profile": profile, "policy_version": "none", "status": strconv.Itoa(status)}
+		if v := telemetrytest.Value(t, m, "routeforge_requests_total", want); v != 1 {
+			t.Errorf("requests_total%v = %g, want 1; have %+v", want, v, telemetrytest.Gather(t, m)["routeforge_requests_total"].Series)
+		}
+		if n := len(telemetrytest.Gather(t, m)["routeforge_requests_total"].Series); n != 1 {
+			t.Errorf("requests_total has %d series, want only the one for %s", n, model)
+		}
+		if got := sink.requestLine(t)["model"]; got != model {
+			t.Errorf("access log model = %v, want %s", got, model)
+		}
+	}
+
+	t.Run("a failover to the fallback is reported under the model that served", func(t *testing.T) {
+		srv, m, sink := build(t, serving())
+		rec := do(t, srv.Handler(), http.MethodPost, "/v1/chat/completions", keyA, okBody, nil)
+		if rec.Code != http.StatusOK || rec.Header().Get("X-RouteForge-Model") != "m-strong" {
+			t.Fatalf("status = %d, served by %q; want 200 from m-strong: %s", rec.Code, rec.Header().Get("X-RouteForge-Model"), rec.Body)
+		}
+		check(t, m, sink, "m-strong", http.StatusOK)
+	})
+
+	t.Run("a streamed failover is reported under the model that served", func(t *testing.T) {
+		srv, m, sink := build(t, serving())
+		rec := do(t, srv.Handler(), http.MethodPost, "/v1/chat/completions", keyA, streamBody, nil)
+		if rec.Code != http.StatusOK || rec.Header().Get("X-RouteForge-Model") != "m-strong" || !strings.Contains(rec.Body.String(), "[DONE]") {
+			t.Fatalf("status = %d, served by %q, body %q; want a complete stream from m-strong", rec.Code, rec.Header().Get("X-RouteForge-Model"), rec.Body)
+		}
+		check(t, m, sink, "m-strong", http.StatusOK)
+	})
+
+	t.Run("a request that no model served keeps the chosen model", func(t *testing.T) {
+		strong := &stubProvider{complete: func(context.Context, provider.Request) (*provider.Response, error) {
+			return nil, down("p-strong")
+		}}
+		srv, m, sink := build(t, strong)
+		rec := do(t, srv.Handler(), http.MethodPost, "/v1/chat/completions", keyA, okBody, nil)
+		if rec.Code < http.StatusInternalServerError {
+			t.Fatalf("status = %d, want a 5xx after both models failed: %s", rec.Code, rec.Body)
+		}
+		check(t, m, sink, "m-fast", rec.Code)
+	})
 }
 
 func TestExplainIsNotARequest(t *testing.T) {
