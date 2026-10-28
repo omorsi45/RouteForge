@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 
+	"github.com/omorsi45/routeforge/internal/accounting"
 	"github.com/omorsi45/routeforge/internal/api"
 	"github.com/omorsi45/routeforge/internal/auth"
 	"github.com/omorsi45/routeforge/internal/config"
@@ -27,11 +28,19 @@ const decisionRingSize = 10000
 // store holds. Totals cover every record.
 const usageRecordsKept = 100000
 
+// gateway is a built gateway: its HTTP surface, and the accounting behind it,
+// which the invariant tests read to check the books.
+type gateway struct {
+	*api.Server
+	accountant *accounting.Accountant
+	usage      *accounting.MemoryUsage
+}
+
 // buildGateway constructs the HTTP surface over cfg: providers, prices, the
 // policy registry, the latency estimators, the model queues, the circuit
 // breakers, the accountant, the routing engine and the executor that retries
 // and fails over. Without a policy the engine routes like the basic router.
-func buildGateway(cfg *config.Config, getenv func(string) string, logger *slog.Logger) (*api.Server, error) {
+func buildGateway(cfg *config.Config, getenv func(string) string, logger *slog.Logger) (*gateway, error) {
 	// No client Timeout: streams outlive any fixed value, so deadlines come
 	// from request contexts.
 	client := &http.Client{Transport: http.DefaultTransport.(*http.Transport).Clone()}
@@ -50,7 +59,8 @@ func buildGateway(cfg *config.Config, getenv func(string) string, logger *slog.L
 	latency := buildHealth(cfg)
 	queues := buildQueues(cfg)
 	breakers := buildBreakers(cfg)
-	acct := buildAccountant(cfg, prices, logger)
+	usage := accounting.NewMemoryUsage(usageRecordsKept)
+	acct := buildAccountant(cfg, prices, usage, logger)
 
 	opts := api.Options{
 		Config: cfg,
@@ -76,7 +86,7 @@ func buildGateway(cfg *config.Config, getenv func(string) string, logger *slog.L
 	if cfg.Policy.Path != "" {
 		opts.ReadyChecks = []api.ReadyCheck{policyReadyCheck(reg)}
 	}
-	return api.New(opts), nil
+	return &gateway{Server: api.New(opts), accountant: acct, usage: usage}, nil
 }
 
 // serve runs the gateway on ln until ctx ends, then drains: /readyz turns

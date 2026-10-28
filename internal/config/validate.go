@@ -236,6 +236,7 @@ func validateFake(base string, f Fake, add addFunc) {
 		{"ttft", f.TTFT < 0},
 		{"per_token", f.PerToken < 0},
 		{"retry_after", f.RetryAfter < 0},
+		{"over_report_tokens", f.OverReportTokens < 0},
 	} {
 		if d.neg {
 			add(base+"."+d.path, "must not be negative")

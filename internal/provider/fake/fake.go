@@ -73,7 +73,7 @@ func (p *Provider) begin(req provider.Request) *call {
 		rng:        rng,
 	}
 	if !omit {
-		c.usage = &provider.Usage{PromptTokens: promptTokens(req), CompletionTokens: n}
+		c.usage = &provider.Usage{PromptTokens: promptTokens(req), CompletionTokens: n + p.cfg.OverReportTokens}
 	}
 	return c
 }

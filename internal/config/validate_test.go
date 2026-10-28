@@ -73,6 +73,7 @@ func TestValidateRejects(t *testing.T) {
 		{"fake output tokens", func(c *config.Config) { c.Providers[0].Fake.OutputTokens = -1 }, "providers[0].fake.output_tokens: must be at least 1"},
 		{"fake disconnect after", func(c *config.Config) { c.Providers[0].Fake.DisconnectAfter = -1 }, "providers[0].fake.disconnect_after: must be at least 1"},
 		{"fake negative ttft", func(c *config.Config) { c.Providers[0].Fake.TTFT = -1 }, "providers[0].fake.ttft: must not be negative"},
+		{"fake negative over report", func(c *config.Config) { c.Providers[0].Fake.OverReportTokens = -1 }, "providers[0].fake.over_report_tokens: must not be negative"},
 		{"fake kind", func(c *config.Config) { c.Providers[0].Fake.ErrorKind = "boom" }, `providers[0].fake.error_kind: unknown kind "boom"`},
 		{"reserved model name", func(c *config.Config) { c.Models[0].Name = "routeforge-auto" }, "models[0].name: routeforge-auto is reserved"},
 		{"bad model name", func(c *config.Config) { c.Models[0].Name = "-x" }, "models[0].name: must match"},

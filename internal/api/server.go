@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"regexp"
@@ -139,6 +140,10 @@ type reqInfo struct {
 	tenant     string
 	model      string
 	decisionID string
+	// streamOpen is set while an event stream has been started and has not
+	// ended with [DONE] or a terminal error event. A request whose context was
+	// canceled in that state left its client with an incomplete response.
+	streamOpen bool
 }
 
 type reqInfoKey struct{}
@@ -196,6 +201,25 @@ func (w *statusRecorder) Write(p []byte) (int, error) {
 
 func (w *statusRecorder) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
+// statusClientGone is the status logged for a request whose client left before
+// the response was complete. It is nginx's convention; net/http has no name
+// for it, and nothing is sent to the departed client.
+const statusClientGone = 499
+
+// clientGone reports whether the client left before the handler finished its
+// response (Ruling C11). The request context must have ended with
+// context.Canceled, which net/http does when the connection closes. The
+// gateway's own deadline lives on a context derived from this one and never
+// ends it, so a timeout is not mistaken for a departure. And the handler must
+// have written nothing (written is the status recorded, 0 for none) or left an
+// event stream open; a response that was written whole stays what it was.
+func clientGone(ctx context.Context, written int, info *reqInfo) bool {
+	if !errors.Is(ctx.Err(), context.Canceled) {
+		return false
+	}
+	return written == 0 || info.streamOpen
+}
+
 // withAccessLog logs one line per request. It never logs bodies.
 func (s *Server) withAccessLog(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -207,11 +231,16 @@ func (s *Server) withAccessLog(next http.Handler) http.Handler {
 		if status == 0 {
 			status = http.StatusOK
 		}
+		gone := clientGone(r.Context(), rec.status, info)
+		if gone {
+			status = statusClientGone
+		}
 		s.logger.LogAttrs(r.Context(), slog.LevelInfo, "request",
 			slog.String("request_id", info.requestID),
 			slog.String("method", r.Method),
 			slog.String("path", r.URL.Path),
 			slog.Int("status", status),
+			slog.Bool("client_gone", gone),
 			slog.Int64("duration_ms", s.now().Sub(start).Milliseconds()),
 			slog.String("tenant", info.tenant),
 			slog.String("model", info.model),

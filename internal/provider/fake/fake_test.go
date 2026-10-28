@@ -231,6 +231,80 @@ func TestOmitUsage(t *testing.T) {
 	}
 }
 
+func TestFakeOverReport(t *testing.T) {
+	clean, err := fake.New("f", baseCfg()).Complete(ctx, req())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := baseCfg()
+	cfg.OverReportTokens = 50
+	p := fake.New("f", cfg)
+
+	t.Run("complete", func(t *testing.T) {
+		resp, err := p.Complete(ctx, req())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.Content != clean.Content {
+			t.Fatalf("Content = %q, want the delivered text unchanged: %q", resp.Content, clean.Content)
+		}
+		if resp.Usage == nil || *resp.Usage != (provider.Usage{PromptTokens: 3, CompletionTokens: 55}) {
+			t.Fatalf("Usage = %+v, want {3 55}: the 5 delivered tokens plus 50", resp.Usage)
+		}
+	})
+
+	t.Run("stream", func(t *testing.T) {
+		s, err := p.Stream(ctx, req())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer s.Close()
+		evs, err := drain(t, s)
+		if err != io.EOF {
+			t.Fatalf("stream ended with %v, want io.EOF", err)
+		}
+		var sb strings.Builder
+		for _, ev := range evs[:len(evs)-1] {
+			sb.WriteString(ev.Delta)
+		}
+		if sb.String() != clean.Content {
+			t.Fatalf("streamed %q, want the delivered text unchanged: %q", sb.String(), clean.Content)
+		}
+		last := evs[len(evs)-1]
+		if last.Usage == nil || *last.Usage != (provider.Usage{PromptTokens: 3, CompletionTokens: 55}) {
+			t.Fatalf("final Usage = %+v, want {3 55}", last.Usage)
+		}
+	})
+
+	t.Run("on top of the max_tokens cap", func(t *testing.T) {
+		r := req()
+		r.MaxTokens = 2
+		resp, err := p.Complete(ctx, r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n := len(strings.Split(resp.Content, " ")); n != 2 {
+			t.Fatalf("got %d words, want 2", n)
+		}
+		if resp.Usage == nil || resp.Usage.CompletionTokens != 52 {
+			t.Fatalf("Usage = %+v, want CompletionTokens 52", resp.Usage)
+		}
+	})
+
+	t.Run("a response without usage stays without", func(t *testing.T) {
+		silent := cfg
+		silent.OmitUsageRate = 1
+		resp, err := fake.New("f", silent).Complete(ctx, req())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.Usage != nil {
+			t.Fatalf("Usage = %+v, want nil: there is nothing to over-report", resp.Usage)
+		}
+	})
+}
+
 func TestFaultSequenceIsSeeded(t *testing.T) {
 	pattern := func() []bool {
 		p := fake.New("f", config.Fake{Seed: 3, OutputTokens: 2, ErrorRate: 0.5, ErrorKind: provider.KindUnavailable, DisconnectAfter: 1})

@@ -1,15 +1,22 @@
 package api
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/omorsi45/routeforge/internal/provider"
 )
 
 func TestModelsList(t *testing.T) {
@@ -137,6 +144,269 @@ func TestNewHTTPServerLimits(t *testing.T) {
 	if hs.ReadTimeout != 0 || hs.WriteTimeout != 0 {
 		t.Errorf("ReadTimeout = %v, WriteTimeout = %v, want both 0", hs.ReadTimeout, hs.WriteTimeout)
 	}
+}
+
+// accessLog is a goroutine-safe log sink: the handler of a request whose client
+// left logs after the client call has returned.
+type accessLog struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (l *accessLog) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.Write(p)
+}
+
+// requestLines returns the "request" lines logged so far.
+func (l *accessLog) requestLines(t *testing.T) []map[string]any {
+	t.Helper()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var lines []map[string]any
+	for _, raw := range strings.Split(strings.TrimSpace(l.buf.String()), "\n") {
+		if raw == "" {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(raw), &m); err != nil {
+			t.Fatalf("log line is not JSON: %v; line %q", err, raw)
+		}
+		if m["msg"] == "request" {
+			lines = append(lines, m)
+		}
+	}
+	return lines
+}
+
+// requestLine returns the only "request" line, waiting up to a second for a
+// handler that is still finishing.
+func (l *accessLog) requestLine(t *testing.T) map[string]any {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		lines := l.requestLines(t)
+		if len(lines) == 1 {
+			return lines[0]
+		}
+		if len(lines) > 1 || time.Now().After(deadline) {
+			t.Fatalf("got %d request log lines, want 1: %v", len(lines), lines)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// cancelAtEndStream delivers one event, then cancels the request context and
+// ends cleanly, as when the client leaves just as the last event goes out.
+type cancelAtEndStream struct {
+	cancel context.CancelFunc
+	sent   bool
+}
+
+func (s *cancelAtEndStream) Recv() (provider.StreamEvent, error) {
+	if !s.sent {
+		s.sent = true
+		return provider.StreamEvent{Delta: "only"}, nil
+	}
+	s.cancel()
+	return provider.StreamEvent{}, io.EOF
+}
+
+func (s *cancelAtEndStream) Close() error { return nil }
+
+func TestAccessLogClientGone499(t *testing.T) {
+	// serve runs one request through a server that logs into a fresh sink and
+	// returns its access log line. build receives the cancel function of the
+	// request context, so a stub can end it the way a departing client does.
+	serve := func(t *testing.T, body string, hdr map[string]string, build func(cancel context.CancelFunc) *stubProvider) map[string]any {
+		t.Helper()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		var sink accessLog
+		srv := newServer(t, testConfig(), map[string]provider.Provider{"p-strong": build(cancel)}, func(o *Options) {
+			o.Logger = slog.New(slog.NewJSONHandler(&sink, nil))
+		})
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)).WithContext(ctx)
+		req.Header.Set("Authorization", "Bearer "+keyA)
+		req.Header.Set("Content-Type", "application/json")
+		for k, v := range hdr {
+			req.Header.Set(k, v)
+		}
+		srv.Handler().ServeHTTP(httptest.NewRecorder(), req)
+		return sink.requestLine(t)
+	}
+	want := func(t *testing.T, line map[string]any, status float64, gone bool) {
+		t.Helper()
+		if line["status"] != status || line["client_gone"] != gone {
+			t.Errorf("status = %v, client_gone = %v; want %v, %v (line %v)", line["status"], line["client_gone"], status, gone, line)
+		}
+	}
+
+	tests := []struct {
+		name       string
+		body       string
+		hdr        map[string]string
+		build      func(cancel context.CancelFunc) *stubProvider
+		wantStatus float64
+		wantGone   bool
+	}{
+		{
+			name: "client leaves during a non-streaming call",
+			body: okBody,
+			build: func(cancel context.CancelFunc) *stubProvider {
+				return &stubProvider{complete: func(ctx context.Context, _ provider.Request) (*provider.Response, error) {
+					cancel()
+					<-ctx.Done()
+					return nil, ctx.Err()
+				}}
+			},
+			wantStatus: 499,
+			wantGone:   true,
+		},
+		{
+			name: "client leaves before the first stream event",
+			body: streamBody,
+			build: func(cancel context.CancelFunc) *stubProvider {
+				return &stubProvider{stream: func(context.Context, provider.Request) (provider.Stream, error) {
+					cancel()
+					return nil, context.Canceled
+				}}
+			},
+			wantStatus: 499,
+			wantGone:   true,
+		},
+		{
+			name: "client leaves mid-stream",
+			body: streamBody,
+			build: func(cancel context.CancelFunc) *stubProvider {
+				return &stubProvider{stream: func(context.Context, provider.Request) (provider.Stream, error) {
+					return &cancelingStream{cancel: cancel}, nil
+				}}
+			},
+			wantStatus: 499,
+			wantGone:   true,
+		},
+		{
+			name: "client leaves after a complete JSON response",
+			body: okBody,
+			build: func(cancel context.CancelFunc) *stubProvider {
+				return &stubProvider{complete: func(context.Context, provider.Request) (*provider.Response, error) {
+					cancel()
+					return &provider.Response{Content: "done", FinishReason: "stop"}, nil
+				}}
+			},
+			wantStatus: 200,
+		},
+		{
+			name: "client leaves as the stream ends",
+			body: streamBody,
+			build: func(cancel context.CancelFunc) *stubProvider {
+				return &stubProvider{stream: func(context.Context, provider.Request) (provider.Stream, error) {
+					return &cancelAtEndStream{cancel: cancel}, nil
+				}}
+			},
+			wantStatus: 200,
+		},
+		{
+			name: "ordinary success",
+			body: okBody,
+			build: func(context.CancelFunc) *stubProvider {
+				return &stubProvider{complete: replyWith("hello")}
+			},
+			wantStatus: 200,
+		},
+		{
+			name: "gateway deadline during a non-streaming call",
+			body: okBody,
+			hdr:  map[string]string{"X-RouteForge-Deadline-Ms": "20"},
+			build: func(context.CancelFunc) *stubProvider {
+				return &stubProvider{complete: blockUntilDone}
+			},
+			wantStatus: 504,
+		},
+		{
+			name: "gateway deadline mid-stream",
+			body: streamBody,
+			hdr:  map[string]string{"X-RouteForge-Deadline-Ms": "50"},
+			build: func(context.CancelFunc) *stubProvider {
+				return streamingProvider(&stubStream{events: []provider.StreamEvent{{Delta: "a"}}, block: true})
+			},
+			wantStatus: 200, // the headers were out; the deadline arrives as an error event
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			want(t, serve(t, tc.body, tc.hdr, tc.build), tc.wantStatus, tc.wantGone)
+		})
+	}
+
+	// The cases above end the request context by hand. These let net/http do
+	// it, as it does when a client closes its connection.
+	open := func(t *testing.T, p *stubProvider) (url string, sink *accessLog) {
+		t.Helper()
+		sink = &accessLog{}
+		srv := newServer(t, testConfig(), map[string]provider.Provider{"p-strong": p}, func(o *Options) {
+			o.Logger = slog.New(slog.NewJSONHandler(sink, nil))
+		})
+		ts := httptest.NewServer(srv.Handler())
+		t.Cleanup(ts.Close)
+		return ts.URL, sink
+	}
+	post := func(t *testing.T, ctx context.Context, url, body string) *http.Response {
+		t.Helper()
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url+"/v1/chat/completions", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+keyA)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	t.Run("a closed connection mid-stream", func(t *testing.T) {
+		st := &stubStream{events: []provider.StreamEvent{{Delta: "first"}}, block: true}
+		url, sink := open(t, streamingProvider(st))
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		resp := post(t, ctx, url, streamBody)
+		defer resp.Body.Close()
+		if line, err := bufio.NewReader(resp.Body).ReadString('\n'); err != nil || !strings.Contains(line, `"first"`) {
+			t.Fatalf("first line = %q, %v; want the first content chunk", line, err)
+		}
+		cancel()
+		want(t, sink.requestLine(t), 499, true)
+	})
+
+	t.Run("a closed connection during a non-streaming call", func(t *testing.T) {
+		entered := make(chan struct{})
+		url, sink := open(t, &stubProvider{complete: func(ctx context.Context, _ provider.Request) (*provider.Response, error) {
+			close(entered)
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}})
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go func() {
+			<-entered
+			cancel()
+		}()
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url+"/v1/chat/completions", strings.NewReader(okBody))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+keyA)
+		req.Header.Set("Content-Type", "application/json")
+		if resp, err := http.DefaultClient.Do(req); err == nil {
+			resp.Body.Close()
+			t.Fatalf("status = %d, want the call to fail with the canceled context", resp.StatusCode)
+		}
+		want(t, sink.requestLine(t), 499, true)
+	})
 }
 
 func TestMethodNotAllowed(t *testing.T) {

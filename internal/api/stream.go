@@ -134,6 +134,10 @@ func (s *Server) serveStream(w http.ResponseWriter, r *http.Request, st *chatSta
 	h.Set("Content-Type", "text/event-stream")
 	h.Set("Cache-Control", "no-cache")
 	h.Set("X-Accel-Buffering", "no")
+	// From here until [DONE] or a terminal error event, a client that leaves
+	// has an incomplete response (the access log's client_gone).
+	info := infoFrom(r.Context())
+	info.streamOpen = true
 	w.WriteHeader(http.StatusOK)
 	if !flush() {
 		return
@@ -152,11 +156,14 @@ func (s *Server) serveStream(w http.ResponseWriter, r *http.Request, st *chatSta
 			finish() // the stream is over; store before the last frame goes out
 			if errors.Is(err, io.EOF) {
 				if _, werr := io.WriteString(w, "data: [DONE]\n\n"); werr == nil {
+					info.streamOpen = false
 					flush()
 				}
 				return
 			}
-			s.writeStreamError(w, st, err, flush)
+			if s.writeStreamError(w, st, err, flush) {
+				info.streamOpen = false
+			}
 			return
 		}
 		frames, err := cw.encode(ev)
@@ -176,11 +183,13 @@ func (s *Server) serveStream(w http.ResponseWriter, r *http.Request, st *chatSta
 
 // writeStreamError sends the terminal error event after the response has been
 // committed. The failure is classified by chatState.failure, so a client that
-// has left (nil) gets nothing and a deadline outranks a cancellation.
-func (s *Server) writeStreamError(w http.ResponseWriter, st *chatState, err error, flush func() bool) {
+// has left (nil) gets nothing and a deadline outranks a cancellation. It
+// reports whether a terminal error event was due: false means the client had
+// left, so the stream ends without one.
+func (s *Server) writeStreamError(w http.ResponseWriter, st *chatState, err error, flush func() bool) bool {
 	aerr := st.failure(err)
 	if aerr == nil {
-		return
+		return false
 	}
 	e := &Error{Status: http.StatusBadGateway, Code: CodeUpstreamStreamInterrupted, Message: "upstream stream interrupted"}
 	if aerr.Code == CodeDeadlineExceeded {
@@ -189,4 +198,5 @@ func (s *Server) writeStreamError(w http.ResponseWriter, st *chatState, err erro
 	if _, werr := w.Write(streamErrorEvent(e)); werr == nil {
 		flush()
 	}
+	return true
 }

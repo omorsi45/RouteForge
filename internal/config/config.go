@@ -189,6 +189,10 @@ type Fake struct {
 	DisconnectRate  float64            `yaml:"disconnect_rate"`
 	DisconnectAfter int                `yaml:"disconnect_after"`
 	OmitUsageRate   float64            `yaml:"omit_usage_rate"`
+	// OverReportTokens is added to the completion tokens a response or stream
+	// reports; the delivered text is unchanged. It makes a provider bill more
+	// than the output cap the gateway reserved for.
+	OverReportTokens int `yaml:"over_report_tokens"`
 }
 
 // Model maps a client-facing model name to a provider model.
