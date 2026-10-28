@@ -416,6 +416,57 @@ func TestDeadlineHeaderOverflowClamps(t *testing.T) {
 	}
 }
 
+// TestStalledBodyIsADeadlineError sends a body that never finishes. The
+// connection's read deadline is the request deadline, so it ends the read; the
+// gateway's own timeout is a 504, not a malformed request. It needs a real
+// server, because only a connection has a read deadline.
+func TestStalledBodyIsADeadlineError(t *testing.T) {
+	strong := &stubProvider{complete: replyWith("hello")}
+	srv := newServer(t, testConfig(), map[string]provider.Provider{"p-strong": strong})
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	// The pipe sends the start of a valid body and then nothing; closing it
+	// lets the client's write loop end.
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { _ = pw.CloseWithError(errors.New("test over")) })
+	go func() { _, _ = pw.Write([]byte(`{"model":"m-strong","messages":[`)) }()
+
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/v1/chat/completions", pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+keyA)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-RouteForge-Deadline-Ms", "100")
+
+	start := time.Now()
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed < 90*time.Millisecond || elapsed > 3*time.Second {
+		t.Errorf("answered after %v, want about the 100ms deadline", elapsed)
+	}
+	var env struct {
+		Error struct{ Code string } `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("response is not an error envelope: %v; body %q", err, raw)
+	}
+	if resp.StatusCode != http.StatusGatewayTimeout || env.Error.Code != CodeDeadlineExceeded {
+		t.Fatalf("status = %d, code = %q; want 504 %s; body %s", resp.StatusCode, env.Error.Code, CodeDeadlineExceeded, raw)
+	}
+	if n := strong.callCount(); n != 0 {
+		t.Errorf("the provider was called %d times for a request that never arrived", n)
+	}
+}
+
 func TestDeadlineHeaderInvalid(t *testing.T) {
 	srv := newServer(t, testConfig(), nil)
 	for _, v := range []string{"abc", "0", "-5", "99999999999999999999"} {

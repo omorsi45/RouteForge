@@ -171,6 +171,14 @@ func (s *Server) readChat(w http.ResponseWriter, r *http.Request) (*chatCall, *E
 	// cancel r.Context(), making a gateway deadline look like a client leaving.
 	s.setConnDeadline(r, rc.SetReadDeadline, "read", deadline.Add(writeGrace))
 	if aerr != nil {
+		// A body that stalls until the request deadline ends the read with the
+		// connection's read deadline, which is the request deadline. That is the
+		// gateway's own timeout, not a malformed request. The wall clock is read
+		// as well because the read deadline can fire a moment before the context
+		// deadline does.
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) || !time.Now().Before(deadline) {
+			return nil, &Error{Status: http.StatusGatewayTimeout, Code: CodeDeadlineExceeded, Message: "request deadline exceeded"}
+		}
 		return nil, aerr
 	}
 
