@@ -89,6 +89,13 @@ func TestReplayCLIRejectsBadFlags(t *testing.T) {
 // offline choice for "cheapest" is m-cheap.
 func replayRoot(t *testing.T) string {
 	t.Helper()
+	return replayRootFor(t, "cheapest")
+}
+
+// replayRootFor is replayRoot with an offline decision of m-cheap for every
+// listed strategy.
+func replayRootFor(t *testing.T, strategies ...string) string {
+	t.Helper()
 	root := t.TempDir()
 	write := func(rel, content string) {
 		t.Helper()
@@ -117,7 +124,9 @@ models:
 	var prompts, decisions, outcomes strings.Builder
 	for i := 1; i <= 2; i++ {
 		fmt.Fprintf(&prompts, `{"prompt_id":"p%d","prompt":"PROMPT-TEXT-%d","prompt_sha256":%q}`+"\n", i, i, sha(i))
-		fmt.Fprintf(&decisions, `{"prompt_id":"p%d","prompt_sha256":%q,"strategy":"cheapest","profile":null,"chosen":"m-cheap","reason":null}`+"\n", i, sha(i))
+		for _, strategy := range strategies {
+			fmt.Fprintf(&decisions, `{"prompt_id":"p%d","prompt_sha256":%q,"strategy":%q,"profile":null,"chosen":"m-cheap","reason":null}`+"\n", i, sha(i), strategy)
+		}
 		for _, model := range []string{"m-cheap", "m-other"} {
 			fmt.Fprintf(&outcomes, `{"prompt_sha256":%q,"model":%q,"success":true,"cost_usd":0.01,"text":"RECORDED"}`+"\n", sha(i), model)
 		}
@@ -131,6 +140,13 @@ models:
 // gatewayServing returns a stub gateway that serves model for every request.
 func gatewayServing(t *testing.T, model func(prompt string) string) *httptest.Server {
 	t.Helper()
+	return gatewayServingBy(t, func(_, prompt string) string { return model(prompt) })
+}
+
+// gatewayServingBy returns a stub gateway that serves model(strategy, prompt),
+// where strategy is the one the request asked for.
+func gatewayServingBy(t *testing.T, model func(strategy, prompt string) string) *httptest.Server {
+	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Messages []struct {
@@ -142,7 +158,7 @@ func gatewayServing(t *testing.T, model func(prompt string) string) *httptest.Se
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		w.Header().Set("X-RouteForge-Model", model(req.Messages[0].Content))
+		w.Header().Set("X-RouteForge-Model", model(r.Header.Get("X-RouteForge-Strategy"), req.Messages[0].Content))
 		w.Header().Set("X-RouteForge-Decision-Id", "dec_stub")
 		_, _ = io.WriteString(w, `{"routeforge":{"decision_id":"dec_stub","cost_usd":0.01}}`)
 	}))
@@ -159,7 +175,7 @@ func TestReplayCLIWritesResult(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d, stderr %q", code, errText)
 	}
-	if want := "replay OK: 2 requests, overall agreement 1.0000, parity pass\n"; out != want {
+	if want := "replay OK: 2 requests, deterministic agreement 1.0000, overall agreement 1.0000, parity pass\n"; out != want {
 		t.Errorf("stdout %q, want %q", out, want)
 	}
 
@@ -215,7 +231,7 @@ func TestReplayCLIExitsZeroWhenParityFails(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d, want 0 because the result records the failed parity; stderr %q", code, errText)
 	}
-	if want := "replay OK: 2 requests, overall agreement 0.0000, parity fail\n"; out != want {
+	if want := "replay OK: 2 requests, deterministic agreement 0.0000, overall agreement 0.0000, parity fail\n"; out != want {
 		t.Errorf("stdout %q, want %q", out, want)
 	}
 	data, err := os.ReadFile(filepath.Join(root, "bench", "results", "mismatch", "replay.json"))
@@ -224,6 +240,34 @@ func TestReplayCLIExitsZeroWhenParityFails(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `"parity_pass": false`) {
 		t.Errorf("result does not record the failed parity:\n%s", data)
+	}
+}
+
+func TestReplayCLIParityIgnoresTheLatencyStrategy(t *testing.T) {
+	root := replayRootFor(t, "cheapest", "latency")
+	srv := gatewayServingBy(t, func(strategy, _ string) string {
+		if strategy == "latency" {
+			return "m-other" // not the offline choice, as a gateway that adapts its estimates may serve
+		}
+		return "m-cheap"
+	})
+
+	code, out, errText := runCLI(t, "replay", "--base-url", srv.URL, "--key", testKey,
+		"--root", root, "--run-id", "latency", "--workers", "1")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr %q", code, errText)
+	}
+	if want := "replay OK: 4 requests, deterministic agreement 1.0000, overall agreement 0.5000, parity pass\n"; out != want {
+		t.Errorf("stdout %q, want %q", out, want)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "bench", "results", "latency", "replay.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"parity_pass": true`, `"deterministic_agreement": 1`, `"overall_agreement": 0.5`, `"latency_note": "The gateway's latency strategy`} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("result lacks %s:\n%s", want, data)
+		}
 	}
 }
 

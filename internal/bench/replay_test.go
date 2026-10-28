@@ -202,8 +202,12 @@ func TestReplayAgreement(t *testing.T) {
 		t.Errorf("mismatches = %+v, want [%+v]", cheapest.Mismatches, want)
 	}
 	requireClose(t, "overall agreement", res.OverallAgreement, 5.0/6)
+	requireClose(t, "deterministic agreement", res.DeterministicAgreement, 5.0/6)
 	if res.ParityPass {
 		t.Error("parity_pass is true with an agreement of 5/6, want false")
+	}
+	if !strongest.Deterministic || !cheapest.Deterministic {
+		t.Errorf("deterministic = %v for strongest and %v for cheapest, want true for both", strongest.Deterministic, cheapest.Deterministic)
 	}
 
 	// The result names prompts by id only and never carries their text or the
@@ -252,6 +256,128 @@ func TestReplayParityThreshold(t *testing.T) {
 				t.Errorf("parity_pass = %v at agreement %v, want %v", res.ParityPass, res.Strategies["strongest"].Agreement, c.pass)
 			}
 		})
+	}
+}
+
+// wantLatencyNote is the text every replay result carries about the latency
+// strategy.
+const wantLatencyNote = "The gateway's latency strategy adapts its estimates to observed attempts (spec 8.6); " +
+	"the offline latency router uses the SIMULATED priors only, so its agreement is reported but not part of the parity check."
+
+func TestReplayLatencyDisagreementDoesNotFailParity(t *testing.T) {
+	const nPrompts = 3
+	root := allGroups(t, nPrompts)
+	// Every strategy picks the offline model except latency, whose estimates
+	// the gateway adapts to what it observes.
+	g := newStubGateway(t, 0, func(group, _ string) stubAnswer {
+		if group == "latency" {
+			return stubAnswer{model: "m-b"}
+		}
+		return stubAnswer{model: "m-a"}
+	})
+
+	res, err := RunReplay(context.Background(), replayOptions(g, root, 4))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	latency := res.Strategies["latency"]
+	if latency.Agree != 0 || latency.N != nPrompts || latency.Deterministic {
+		t.Errorf("latency = n %d, agree %d, deterministic %v, want 3, 0 and false", latency.N, latency.Agree, latency.Deterministic)
+	}
+	for name, s := range res.Strategies {
+		if name != "latency" && !s.Deterministic {
+			t.Errorf("%s is not marked deterministic", name)
+		}
+	}
+	if !res.ParityPass {
+		t.Error("parity_pass is false although only the latency strategy disagrees")
+	}
+	// The pooled agreement over the deterministic groups leaves latency out;
+	// the overall one counts every group: 6 groups of 3 agree, 1 of 3 does not.
+	requireClose(t, "deterministic agreement", res.DeterministicAgreement, 1)
+	requireClose(t, "overall agreement", res.OverallAgreement, 18.0/21)
+	if res.LatencyNote != wantLatencyNote {
+		t.Errorf("latency note = %q, want %q", res.LatencyNote, wantLatencyNote)
+	}
+}
+
+func TestReplayDeterministicDisagreementFailsParity(t *testing.T) {
+	root := allGroups(t, 3)
+	// One of the three prompts of the static strategy is served by another
+	// model; latency and the rest agree.
+	g := newStubGateway(t, 0, func(group, prompt string) stubAnswer {
+		if group == "static" && prompt == "text 0" {
+			return stubAnswer{model: "m-b"}
+		}
+		return stubAnswer{model: "m-a"}
+	})
+
+	res, err := RunReplay(context.Background(), replayOptions(g, root, 4))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	static := res.Strategies["static"]
+	if static.Agree != 2 || static.N != 3 {
+		t.Fatalf("static = %d of %d, want 2 of 3", static.Agree, static.N)
+	}
+	if res.ParityPass {
+		t.Error("parity_pass is true with a deterministic strategy at 2/3, want false")
+	}
+	requireClose(t, "deterministic agreement", res.DeterministicAgreement, 17.0/18)
+	requireClose(t, "overall agreement", res.OverallAgreement, 20.0/21)
+}
+
+func TestReplayResultEncodesTheParityScope(t *testing.T) {
+	root := allGroups(t, 1)
+	g := newStubGateway(t, 0, func(_, _ string) stubAnswer { return stubAnswer{model: "m-a"} })
+	res, err := RunReplay(context.Background(), replayOptions(g, root, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(res)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"deterministic_agreement":1`, `"overall_agreement":1`, `"parity_pass":true`, `"latency_note":"The gateway`} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("result JSON lacks %s: %s", want, data)
+		}
+	}
+	var doc struct {
+		Strategies map[string]struct {
+			Deterministic *bool `json:"deterministic"`
+		} `json:"strategies"`
+	}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatal(err)
+	}
+	for name, s := range doc.Strategies {
+		if s.Deterministic == nil {
+			t.Errorf("strategy %s has no deterministic key", name)
+			continue
+		}
+		if want := name != "latency"; *s.Deterministic != want {
+			t.Errorf("strategy %s: deterministic = %v, want %v", name, *s.Deterministic, want)
+		}
+	}
+}
+
+func TestReplayNeedsADeterministicStrategy(t *testing.T) {
+	root := t.TempDir()
+	writeReplayFiles(t, root,
+		[]map[string]any{promptRow(1, "one")},
+		[]map[string]any{decisionRow(1, "latency", "", "m-a")},
+		[]map[string]any{outcomeRow(1, "m-a", true, 0.01)})
+	g := newStubGateway(t, 0, func(_, _ string) stubAnswer { return stubAnswer{model: "m-a"} })
+
+	_, err := RunReplay(context.Background(), replayOptions(g, root, 1))
+	if err == nil || !strings.Contains(err.Error(), "deterministic") {
+		t.Fatalf("err = %v, want one that says there is no deterministic strategy to check", err)
+	}
+	if len(g.order) != 0 {
+		t.Errorf("sent %d requests before refusing the data", len(g.order))
 	}
 }
 
@@ -411,7 +537,7 @@ func allGroups(t *testing.T, nPrompts int) string {
 		for _, s := range []string{"strongest", "cheapest", "static", "latency"} {
 			decisions = append(decisions, decisionRow(i, s, "", "m-a"))
 		}
-		outcomes = append(outcomes, outcomeRow(i, "m-a", true, 0.01))
+		outcomes = append(outcomes, outcomeRow(i, "m-a", true, 0.01), outcomeRow(i, "m-b", true, 0.01))
 	}
 	writeReplayFiles(t, root, prompts, decisions, outcomes)
 	return root

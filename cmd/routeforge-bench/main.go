@@ -136,9 +136,10 @@ func passFail(ok bool) string {
 
 // cmdReplay sends the offline decisions of the trainer's test split through a
 // running gateway and writes bench/results/<run-id>/replay.json. A gateway that
-// disagrees with the trainer is a result, not a failure of the command: it
-// exits 0 and the result says parity_pass false. It exits 1 on an error that
-// leaves no result, such as a gateway that cannot be reached.
+// disagrees with the trainer on a deterministic strategy is a result, not a
+// failure of the command: it exits 0 and the result says parity_pass false. It
+// exits 1 on an error that leaves no result, such as a gateway that cannot be
+// reached.
 func cmdReplay(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("replay", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -184,8 +185,8 @@ func cmdReplay(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		fmt.Fprintf(stderr, "replay: %v\n", err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "replay OK: %d requests, overall agreement %.4f, parity %s\n",
-		results.Requests, results.OverallAgreement, passFail(results.ParityPass))
+	fmt.Fprintf(stdout, "replay OK: %d requests, deterministic agreement %.4f, overall agreement %.4f, parity %s\n",
+		results.Requests, results.DeterministicAgreement, results.OverallAgreement, passFail(results.ParityPass))
 	return 0
 }
 

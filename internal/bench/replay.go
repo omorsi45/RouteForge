@@ -14,10 +14,14 @@ import (
 	"sync/atomic"
 )
 
-// ParityThreshold is the agreement every strategy must reach for the gateway
-// to pass the replay benchmark: the share of requests on which it chooses the
-// model the trainer chose offline.
+// ParityThreshold is the agreement every deterministic strategy must reach for
+// the gateway to pass the replay benchmark: the share of requests on which it
+// chooses the model the trainer chose offline.
 const ParityThreshold = 0.999
+
+// ReplayLatencyNote is the text of ReplayResults.LatencyNote.
+const ReplayLatencyNote = "The gateway's latency strategy adapts its estimates to observed attempts (spec 8.6); " +
+	"the offline latency router uses the SIMULATED priors only, so its agreement is reported but not part of the parity check."
 
 // maxMismatches is how many disagreements a strategy's result lists.
 const maxMismatches = 50
@@ -32,6 +36,14 @@ func (g replayGroup) label() string {
 	}
 	return g.strategy + "/" + g.profile
 }
+
+// deterministic reports whether the group's decisions are a pure function of
+// the request and the policy, which is what parity checks: the gateway must
+// implement the offline decision function. Latency is the one that is not. Its
+// gateway estimates move with every attempt the gateway observes (spec 8.6),
+// while the offline router uses the frozen simulated priors, so the two are
+// different functions once the gateway has served traffic.
+func (g replayGroup) deterministic() bool { return g.strategy != "latency" }
 
 // replayGroups lists the groups in the order they run. Latency goes first, on a
 // gateway no other strategy has touched: its choice follows the latency the
@@ -73,6 +85,9 @@ type StrategyResult struct {
 	N         int     `json:"n"`
 	Agree     int     `json:"agree"`
 	Agreement float64 `json:"agreement"` // Agree / N
+	// Deterministic is whether the strategy is a pure function of the request
+	// and the policy, so that its agreement is part of the parity check.
+	Deterministic bool `json:"deterministic"`
 	// Mismatches lists the first disagreements in prompt order, at most
 	// maxMismatches of them.
 	Mismatches []Mismatch     `json:"mismatches"`
@@ -88,11 +103,17 @@ type StrategyResult struct {
 
 // ReplayResults is what RunReplay measured.
 type ReplayResults struct {
-	Prompts          int                       `json:"prompts"`
-	Requests         int                       `json:"requests"`
-	Strategies       map[string]StrategyResult `json:"strategies"` // by "strategy" or "quality/<profile>"
-	OverallAgreement float64                   `json:"overall_agreement"`
-	ParityPass       bool                      `json:"parity_pass"` // every agreement >= ParityThreshold
+	Prompts    int                       `json:"prompts"`
+	Requests   int                       `json:"requests"`
+	Strategies map[string]StrategyResult `json:"strategies"` // by "strategy" or "quality/<profile>"
+	// DeterministicAgreement is the agreement pooled over the deterministic
+	// groups and OverallAgreement the one over all groups.
+	DeterministicAgreement float64 `json:"deterministic_agreement"`
+	OverallAgreement       float64 `json:"overall_agreement"`
+	// ParityPass is true when every deterministic group reached ParityThreshold.
+	ParityPass bool `json:"parity_pass"`
+	// LatencyNote says why the latency group is reported but not checked.
+	LatencyNote string `json:"latency_note"`
 }
 
 type promptRecord struct {
@@ -225,6 +246,11 @@ func loadReplayData(dir string) (*replayData, error) {
 // that served it with the offline choice. The groups run one at a time, in the
 // order of replayGroups, each with o.Workers requests in flight.
 //
+// Parity covers the deterministic groups (see replayGroup.deterministic); the
+// latency group is run and reported but does not count towards ParityPass or
+// DeterministicAgreement. The data must hold a decision of at least one
+// deterministic group.
+//
 // A request that fails with an HTTP status counts as a disagreement and as an
 // error of that code. A request that gets no response ends the run with an
 // error: a gateway that cannot be reached says nothing about its decisions.
@@ -240,9 +266,17 @@ func RunReplay(ctx context.Context, o ReplayOptions) (ReplayResults, error) {
 	if err != nil {
 		return ReplayResults{}, err
 	}
+	hasDeterministic := false
+	for g, rows := range data.groups {
+		hasDeterministic = hasDeterministic || (g.deterministic() && len(rows) > 0)
+	}
+	if !hasDeterministic {
+		return ReplayResults{}, errors.New("decisions.jsonl has no decision of a deterministic strategy, so there is no parity to check")
+	}
 
-	res := ReplayResults{Prompts: len(data.prompts), Strategies: map[string]StrategyResult{}}
-	agree, pass := 0, true
+	res := ReplayResults{Prompts: len(data.prompts), Strategies: map[string]StrategyResult{}, LatencyNote: ReplayLatencyNote}
+	var agree, detRequests, detAgree int
+	pass := true
 	for _, g := range replayGroups {
 		rows := data.groups[g]
 		if len(rows) == 0 {
@@ -255,9 +289,14 @@ func RunReplay(ctx context.Context, o ReplayOptions) (ReplayResults, error) {
 		res.Strategies[g.label()] = sr
 		res.Requests += sr.N
 		agree += sr.Agree
-		pass = pass && sr.Agreement >= ParityThreshold
+		if sr.Deterministic {
+			detRequests += sr.N
+			detAgree += sr.Agree
+			pass = pass && sr.Agreement >= ParityThreshold
+		}
 	}
 	res.OverallAgreement = float64(agree) / float64(res.Requests)
+	res.DeterministicAgreement = float64(detAgree) / float64(detRequests)
 	res.ParityPass = pass
 	return res, nil
 }
@@ -282,11 +321,12 @@ func runGroup(ctx context.Context, o ReplayOptions, data *replayData, g replayGr
 	}
 
 	r := StrategyResult{
-		Strategy:   g.strategy,
-		Profile:    g.profile,
-		N:          len(rows),
-		Mismatches: []Mismatch{},
-		Errors:     map[string]int{},
+		Strategy:      g.strategy,
+		Profile:       g.profile,
+		N:             len(rows),
+		Deterministic: g.deterministic(),
+		Mismatches:    []Mismatch{},
+		Errors:        map[string]int{},
 	}
 	successes := 0
 	for i, row := range rows {
