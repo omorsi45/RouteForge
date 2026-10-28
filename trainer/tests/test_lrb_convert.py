@@ -39,13 +39,13 @@ def test_member_dataset_model():
 
 def test_convert_writes_schema_rows_in_order(tmp_path):
     raw = tmp_path / "raw"
-    gpt = member(AIME, "gpt-5")
+    gpt_member = member(AIME, "gpt-5")
     qwen = member(AIME, "qwen3-235b-a22b-2507")
-    write_member(raw, gpt, [record(2, "p2", 1.0, cost=1), record(1, "p1", 0.0)])
+    write_member(raw, gpt_member, [record(2, "p2", 1.0, cost=1), record(1, "p1", 0.0)])
     write_member(raw, qwen, [record(2, "p2", 0.0), record(1, "p1", 1.0)])
     out = tmp_path / "work" / "outcomes.jsonl"
     # members passed in reverse pool order; output must follow pool order
-    stats = convert_llmrouterbench(raw, [qwen, gpt], out, tmp_path)
+    stats = convert_llmrouterbench(raw, [qwen, gpt_member], out, tmp_path)
     rows = list(read_outcomes(out))
     assert [(r.model, r.prompt_id) for r in rows] == [
         ("gpt-5", "aime:1"),
@@ -110,11 +110,11 @@ def test_convert_clamps_negative_completion_tokens(tmp_path):
 
 def test_convert_stats_to_json(tmp_path):
     raw = tmp_path / "raw"
-    gpt = member(AIME, "gpt-5")
-    claude = member(AIME, "claude-sonnet-4")
-    write_member(raw, gpt, [record(1, "p", 1.0)])
-    write_member(raw, claude, [record(1, "p", 0.0)])
-    stats = convert_llmrouterbench(raw, [claude, gpt], tmp_path / "o.jsonl", tmp_path)
+    gpt_member = member(AIME, "gpt-5")
+    sonnet_member = member(AIME, "claude-sonnet-4")
+    write_member(raw, gpt_member, [record(1, "p", 1.0)])
+    write_member(raw, sonnet_member, [record(1, "p", 0.0)])
+    stats = convert_llmrouterbench(raw, [sonnet_member, gpt_member], tmp_path / "o.jsonl", tmp_path)
     assert stats.to_json() == {
         "rows": 2,
         "records": [
@@ -128,19 +128,19 @@ def test_convert_stats_to_json(tmp_path):
 
 def test_convert_rejects_model_name_mismatch(tmp_path):
     raw = tmp_path / "raw"
-    gpt = member(AIME, "gpt-5")
-    write_member(raw, gpt, [record(1, "p", 1.0)], model="gpt-4")
+    gpt_member = member(AIME, "gpt-5")
+    write_member(raw, gpt_member, [record(1, "p", 1.0)], model="gpt-4")
     with pytest.raises(TrainerError, match="aime-hybrid-gpt-5-1.json") as excinfo:
-        convert_llmrouterbench(raw, [gpt], tmp_path / "o.jsonl", tmp_path)
+        convert_llmrouterbench(raw, [gpt_member], tmp_path / "o.jsonl", tmp_path)
     assert "gpt-4" in str(excinfo.value)
 
 
 def test_convert_rejects_dataset_name_mismatch(tmp_path):
     raw = tmp_path / "raw"
-    gpt = member(AIME, "gpt-5")
-    write_member(raw, gpt, [record(1, "p", 1.0)], dataset="gpqa")
+    gpt_member = member(AIME, "gpt-5")
+    write_member(raw, gpt_member, [record(1, "p", 1.0)], dataset="gpqa")
     with pytest.raises(TrainerError, match="aime-hybrid-gpt-5-1.json") as excinfo:
-        convert_llmrouterbench(raw, [gpt], tmp_path / "o.jsonl", tmp_path)
+        convert_llmrouterbench(raw, [gpt_member], tmp_path / "o.jsonl", tmp_path)
     assert "gpqa" in str(excinfo.value)
 
 
@@ -150,36 +150,38 @@ def test_convert_rejects_dataset_name_mismatch(tmp_path):
 )
 def test_convert_rejects_bad_records(tmp_path, bad):
     raw = tmp_path / "raw"
-    gpt = member(AIME, "gpt-5")
+    gpt_member = member(AIME, "gpt-5")
     good = record(1, "p1", 1.0)
     broken = {**record(2, "p2", 1.0), **bad}
-    write_member(raw, gpt, [good, broken])
+    write_member(raw, gpt_member, [good, broken])
     with pytest.raises(ValueError, match=r"aime-hybrid-gpt-5-1\.json.*index 2"):
-        convert_llmrouterbench(raw, [gpt], tmp_path / "o.jsonl", tmp_path)
+        convert_llmrouterbench(raw, [gpt_member], tmp_path / "o.jsonl", tmp_path)
 
 
 def test_convert_rejects_lone_surrogate_prompt(tmp_path):
     raw = tmp_path / "raw"
-    gpt = member(AIME, "gpt-5")
-    write_member(raw, gpt, [record(1, "bad \ud800 prompt", 1.0)])
+    gpt_member = member(AIME, "gpt-5")
+    write_member(raw, gpt_member, [record(1, "bad \ud800 prompt", 1.0)])
     with pytest.raises(ValueError, match="index 1"):
-        convert_llmrouterbench(raw, [gpt], tmp_path / "o.jsonl", tmp_path)
+        convert_llmrouterbench(raw, [gpt_member], tmp_path / "o.jsonl", tmp_path)
 
 
 def test_convert_rejects_duplicate_index(tmp_path):
     raw = tmp_path / "raw"
-    gpt = member(AIME, "gpt-5")
-    write_member(raw, gpt, [record(1, "p", 1.0), record(1, "p", 0.0)])
+    gpt_member = member(AIME, "gpt-5")
+    write_member(raw, gpt_member, [record(1, "p", 1.0), record(1, "p", 0.0)])
     with pytest.raises(ValueError, match="duplicate"):
-        convert_llmrouterbench(raw, [gpt], tmp_path / "o.jsonl", tmp_path)
+        convert_llmrouterbench(raw, [gpt_member], tmp_path / "o.jsonl", tmp_path)
 
 
 def test_convert_output_has_no_model_output_text(tmp_path):
     raw = tmp_path / "raw"
-    gpt = member(AIME, "gpt-5")
+    gpt_member = member(AIME, "gpt-5")
     arena = member(ARENA, "gpt-5")
     write_member(
-        raw, gpt, [record(1, "p", 1.0, prediction="SECRET-PREDICTION", raw_output="SECRET-RAW")]
+        raw,
+        gpt_member,
+        [record(1, "p", 1.0, prediction="SECRET-PREDICTION", raw_output="SECRET-RAW")],
     )
     write_member(
         raw,
@@ -195,7 +197,7 @@ def test_convert_output_has_no_model_output_text(tmp_path):
         ],
     )
     out = tmp_path / "outcomes.jsonl"
-    convert_llmrouterbench(raw, [gpt, arena], out, tmp_path)
+    convert_llmrouterbench(raw, [gpt_member, arena], out, tmp_path)
     data = out.read_bytes()
     assert b"SECRET-PREDICTION" not in data
     assert b"SECRET-RAW" not in data
@@ -276,19 +278,24 @@ def test_export_replay_writes_raw_output_for_test_prompts_only(tmp_path):
 
 def test_export_replay_rejects_non_string_raw_output(tmp_path):
     raw = tmp_path / "raw"
-    gpt = member(AIME, "gpt-5")
-    write_member(raw, gpt, [record(1, "p", 1.0, raw_output=None)])
+    gpt_member = member(AIME, "gpt-5")
+    write_member(raw, gpt_member, [record(1, "p", 1.0, raw_output=None)])
     with pytest.raises(ValueError, match="raw_output"):
         export_replay(
-            raw, [gpt], {"aime:1"}, {"aime": label_rule([1.0])}, tmp_path / "r.jsonl", tmp_path
+            raw,
+            [gpt_member],
+            {"aime:1"},
+            {"aime": label_rule([1.0])},
+            tmp_path / "r.jsonl",
+            tmp_path,
         )
 
 
 def test_export_replay_ignores_bad_raw_output_of_non_test_prompts(tmp_path):
     raw = tmp_path / "raw"
-    gpt = member(AIME, "gpt-5")
-    write_member(raw, gpt, [record(1, "p1", 1.0, raw_output=None), record(2, "p2", 1.0)])
+    gpt_member = member(AIME, "gpt-5")
+    write_member(raw, gpt_member, [record(1, "p1", 1.0, raw_output=None), record(2, "p2", 1.0)])
     info = export_replay(
-        raw, [gpt], {"aime:2"}, {"aime": label_rule([1.0])}, tmp_path / "r.jsonl", tmp_path
+        raw, [gpt_member], {"aime:2"}, {"aime": label_rule([1.0])}, tmp_path / "r.jsonl", tmp_path
     )
     assert info.rows == 1
