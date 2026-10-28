@@ -104,6 +104,8 @@ func TestValidateRejects(t *testing.T) {
 		{"negative queue timeout", func(c *config.Config) { c.Models[0].QueueTimeout = -time.Second }, "models[0].queue_timeout: must be positive"},
 		{"negative rpm", func(c *config.Config) { c.Tenants[0].RPM = -1 }, "tenants[0].rpm: must not be negative"},
 		{"negative tpm", func(c *config.Config) { c.Tenants[0].TPM = -1 }, "tenants[0].tpm: must not be negative"},
+		{"rpm above the supported rate", func(c *config.Config) { c.Tenants[0].RPM = 100_000_001 }, "tenants[0].rpm: must be at most 100000000"},
+		{"tpm above the supported rate", func(c *config.Config) { c.Tenants[0].TPM = 100_000_001 }, "tenants[0].tpm: must be at most 100000000"},
 		{"negative budget", func(c *config.Config) { c.Tenants[0].DailyBudgetUSD = -1 }, "tenants[0].daily_budget_usd: must be finite and not negative"},
 		{"nan budget", func(c *config.Config) { c.Tenants[0].DailyBudgetUSD = math.NaN() }, "tenants[0].daily_budget_usd: must be finite and not negative"},
 		{"inf budget", func(c *config.Config) { c.Tenants[0].DailyBudgetUSD = math.Inf(1) }, "tenants[0].daily_budget_usd: must be finite and not negative"},
@@ -464,4 +466,91 @@ func TestBudgetValidationAgreesWithUSDToNanos(t *testing.T) {
 			t.Fatalf("budget %v: USDToNanos error = %v, Validate error = %v", usd, convErr, valErr)
 		}
 	}
+}
+
+func TestValidateAcceptsTheLargestRates(t *testing.T) {
+	c := valid(t)
+	c.Tenants[0].RPM = 100_000_000
+	c.Tenants[0].TPM = 100_000_000
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+}
+
+func TestStorageConfigValidation(t *testing.T) {
+	t.Run("both default to memory", func(t *testing.T) {
+		c := valid(t)
+		if c.Storage.Type != config.StorageMemory || c.Limiter.Type != config.LimiterMemory {
+			t.Errorf("defaults = storage %q, limiter %q; want memory for both", c.Storage.Type, c.Limiter.Type)
+		}
+		if c.Storage.DSNEnv != "" || c.Limiter.URLEnv != "" {
+			t.Errorf("env names default to %q and %q, want none", c.Storage.DSNEnv, c.Limiter.URLEnv)
+		}
+	})
+
+	t.Run("postgres and redis are read from the file", func(t *testing.T) {
+		doc := "storage: {type: postgres, dsn_env: RF_PG_DSN}\nlimiter: {type: redis, url_env: RF_REDIS_URL}\n" + minimalDoc
+		c, err := config.Parse([]byte(doc))
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		if c.Storage != (config.Storage{Type: config.StoragePostgres, DSNEnv: "RF_PG_DSN"}) {
+			t.Errorf("Storage = %+v", c.Storage)
+		}
+		if c.Limiter != (config.Limiter{Type: config.LimiterRedis, URLEnv: "RF_REDIS_URL"}) {
+			t.Errorf("Limiter = %+v", c.Limiter)
+		}
+	})
+
+	t.Run("an unknown field is rejected", func(t *testing.T) {
+		_, err := config.Parse([]byte("storage: {type: memory, dsn: x}\n" + minimalDoc))
+		if err == nil || !strings.Contains(err.Error(), "dsn") {
+			t.Errorf("Parse with storage.dsn: err = %v", err)
+		}
+	})
+
+	t.Run("memory needs no env name", func(t *testing.T) {
+		c := valid(t)
+		c.Storage.Type, c.Limiter.Type = config.StorageMemory, config.LimiterMemory
+		if err := c.Validate(); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+	})
+
+	rejects := []struct {
+		name   string
+		mutate func(*config.Config)
+		want   string
+	}{
+		{"unknown storage type", func(c *config.Config) { c.Storage.Type = "sqlite" }, "storage.type: must be one of memory, postgres"},
+		{"postgres without dsn_env", func(c *config.Config) { c.Storage.Type = config.StoragePostgres }, "storage.dsn_env: required when storage.type is postgres"},
+		{"postgres with a bad dsn_env", func(c *config.Config) {
+			c.Storage.Type, c.Storage.DSNEnv = config.StoragePostgres, "pg-dsn"
+		}, "storage.dsn_env: must match ^[A-Z_][A-Z0-9_]*$"},
+		{"a bad dsn_env on memory", func(c *config.Config) { c.Storage.DSNEnv = "pg dsn" }, "storage.dsn_env: must match ^[A-Z_][A-Z0-9_]*$"},
+		{"unknown limiter type", func(c *config.Config) { c.Limiter.Type = "memcached" }, "limiter.type: must be one of memory, redis"},
+		{"redis without url_env", func(c *config.Config) { c.Limiter.Type = config.LimiterRedis }, "limiter.url_env: required when limiter.type is redis"},
+		{"redis with a bad url_env", func(c *config.Config) {
+			c.Limiter.Type, c.Limiter.URLEnv = config.LimiterRedis, "redis://localhost"
+		}, "limiter.url_env: must match ^[A-Z_][A-Z0-9_]*$"},
+	}
+	for _, tc := range rejects {
+		t.Run(tc.name, func(t *testing.T) {
+			c := valid(t)
+			tc.mutate(c)
+			err := c.Validate()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Validate = %v, want an error containing %q", err, tc.want)
+			}
+		})
+	}
+
+	t.Run("valid postgres and redis settings", func(t *testing.T) {
+		c := valid(t)
+		c.Storage = config.Storage{Type: config.StoragePostgres, DSNEnv: "ROUTEFORGE_DATABASE_URL"}
+		c.Limiter = config.Limiter{Type: config.LimiterRedis, URLEnv: "_REDIS_URL_2"}
+		if err := c.Validate(); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+	})
 }

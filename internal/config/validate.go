@@ -37,6 +37,7 @@ func (c *Config) Validate() error {
 	c.validateServer(add)
 	c.validateReliability(add)
 	c.validateAccounting(add)
+	c.validateBackends(add)
 
 	if len(c.Providers) == 0 {
 		add("providers", "at least one provider is required")
@@ -128,6 +129,35 @@ func (c *Config) validateAccounting(add addFunc) {
 		add("accounting.usage_queue", "must be at least 1")
 	}
 }
+
+// validateBackends checks the storage and limiter sections: the type is known,
+// and a type that needs a connection names the environment variable that holds
+// it. A name that is set is checked whatever the type, so that switching the
+// type later does not turn up a typo.
+func (c *Config) validateBackends(add addFunc) {
+	if !oneOf(c.Storage.Type, []string{StorageMemory, StoragePostgres}) {
+		add("storage.type", "must be one of %s, %s", StorageMemory, StoragePostgres)
+	}
+	if c.Storage.Type == StoragePostgres && c.Storage.DSNEnv == "" {
+		add("storage.dsn_env", "required when storage.type is %s", StoragePostgres)
+	} else if c.Storage.DSNEnv != "" && !envNameRE.MatchString(c.Storage.DSNEnv) {
+		add("storage.dsn_env", "must match %s", envNameRE)
+	}
+
+	if !oneOf(c.Limiter.Type, []string{LimiterMemory, LimiterRedis}) {
+		add("limiter.type", "must be one of %s, %s", LimiterMemory, LimiterRedis)
+	}
+	if c.Limiter.Type == LimiterRedis && c.Limiter.URLEnv == "" {
+		add("limiter.url_env", "required when limiter.type is %s", LimiterRedis)
+	} else if c.Limiter.URLEnv != "" && !envNameRE.MatchString(c.Limiter.URLEnv) {
+		add("limiter.url_env", "must match %s", envNameRE)
+	}
+}
+
+// maxRatePerMinute is the largest rpm or tpm a tenant may have. The Redis
+// limiter keeps its buckets in Lua doubles and refuses a rate above it, so the
+// configuration refuses it first.
+const maxRatePerMinute = 100_000_000
 
 // Budgets are exact amounts of nano-USD, so a budget must survive a trip
 // through float64 unchanged. accounting.USDToNanos applies the same rule when
@@ -369,9 +399,13 @@ func (c *Config) validateTenants(add addFunc) map[string]string {
 		}
 		if t.RPM < 0 {
 			add(base+".rpm", "must not be negative")
+		} else if t.RPM > maxRatePerMinute {
+			add(base+".rpm", "must be at most %d", maxRatePerMinute)
 		}
 		if t.TPM < 0 {
 			add(base+".tpm", "must not be negative")
+		} else if t.TPM > maxRatePerMinute {
+			add(base+".tpm", "must be at most %d", maxRatePerMinute)
 		}
 		if problem := budgetProblem(t.DailyBudgetUSD); problem != "" {
 			add(base+".daily_budget_usd", "%s", problem)

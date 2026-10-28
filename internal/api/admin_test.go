@@ -2,8 +2,11 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -433,5 +436,97 @@ func TestAdminRollbackWithoutPrevious(t *testing.T) {
 	wantError(t, rec, http.StatusConflict, CodeNoPreviousPolicy)
 	if got := env.chatPolicyVersion(t); got != a.Version {
 		t.Errorf("chat used %q after a failed rollback, want %s", got, a.Version)
+	}
+}
+
+// failingPersister is a policy.Persister whose writes fail with err.
+type failingPersister struct{ err error }
+
+func (p failingPersister) SavePolicy(context.Context, *policy.Policy) error { return p.err }
+
+func (p failingPersister) Activate(context.Context, string, string, string, string) error {
+	return p.err
+}
+
+func (failingPersister) ActiveVersion(context.Context) (string, bool, error) { return "", false, nil }
+
+func (failingPersister) LoadRaw(context.Context, string) ([]byte, error) {
+	return nil, errors.New("not used")
+}
+
+type errorBody struct {
+	Error struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+func TestAdminStorageFailureIs503(t *testing.T) {
+	const detail = "FATAL: password authentication failed for user routeforge (host=10.1.2.3)"
+	aJSON, bJSON := policyPairJSON(t)
+	a, b := mustLoadPolicy(t, aJSON), mustLoadPolicy(t, bJSON)
+	cJSON := policyJSON(t, func(tree map[string]any) {
+		predictor, _ := firstModel(t, tree)["predictor"].(map[string]any)
+		predictor["init"] = json.Number("0.456")
+	})
+	logs := &accessLog{}
+	env := newAdminEnv(t, a, func(e *poolEnv) {
+		activate(t, e.reg, b) // b is active and a is the policy to roll back to
+		e.reg.SetPersister(failingPersister{err: errors.New(detail)})
+		e.opts = append(e.opts, func(o *Options) { o.Logger = slog.New(slog.NewJSONHandler(logs, nil)) })
+	})
+
+	for _, c := range []struct {
+		name, method, path, body string
+	}{
+		{"upload", http.MethodPost, "/admin/policies", string(cJSON)},
+		{"activate", http.MethodPost, "/admin/policies/" + a.Version + "/activate", ""},
+		{"rollback", http.MethodPost, "/admin/policies/rollback", ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			rec := env.admin(t, c.method, c.path, c.body)
+			got := decodeBody[errorBody](t, rec, http.StatusServiceUnavailable)
+			if got.Error.Code != "storage_unavailable" {
+				t.Errorf("error code = %q, want storage_unavailable", got.Error.Code)
+			}
+			if rec.Header().Get("Retry-After") != "1" {
+				t.Errorf("Retry-After = %q, want 1", rec.Header().Get("Retry-After"))
+			}
+			if strings.Contains(rec.Body.String(), "10.1.2.3") || strings.Contains(rec.Body.String(), "password") {
+				t.Errorf("the body leaks the storage error: %s", rec.Body)
+			}
+		})
+	}
+
+	// Every failure is in the log, with its detail, and nothing changed.
+	var logged int
+	for _, msg := range []string{"add policy failed", "activate policy failed", "roll back policy failed"} {
+		for _, line := range logs.named(t, msg) {
+			logged++
+			if !strings.Contains(line["error"].(string), detail) || line["request_id"] == "" {
+				t.Errorf("%s: log line %v lacks the detail or the request id", msg, line)
+			}
+		}
+	}
+	if logged != 3 {
+		t.Errorf("%d failures logged, want 3", logged)
+	}
+	list := decodeBody[adminListBody](t, env.admin(t, http.MethodGet, "/admin/policies", ""), http.StatusOK)
+	if list.Active == nil || *list.Active != b.Version || len(list.Policies) != 2 {
+		t.Errorf("after the failures: active %v with %d policies, want %s and 2", list.Active, len(list.Policies), b.Version)
+	}
+}
+
+func TestAdminUploadRejectedByStorageIsInvalidRequest(t *testing.T) {
+	aJSON, bJSON := policyPairJSON(t)
+	a := mustLoadPolicy(t, aJSON)
+	env := newAdminEnv(t, a, func(e *poolEnv) {
+		problem := &policy.ValidationError{Path: "created_at", Problem: "must be an RFC 3339 timestamp"}
+		e.reg.SetPersister(failingPersister{err: problem})
+	})
+	rec := env.admin(t, http.MethodPost, "/admin/policies", string(bJSON))
+	got := decodeBody[errorBody](t, rec, http.StatusBadRequest)
+	if got.Error.Code != "invalid_request" || !strings.Contains(got.Error.Message, "created_at") {
+		t.Errorf("error = %+v, want invalid_request naming created_at", got.Error)
 	}
 }

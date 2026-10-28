@@ -30,6 +30,8 @@ type Config struct {
 	Policy      Policy      `yaml:"policy"`
 	Pricing     Pricing     `yaml:"pricing"`
 	Accounting  Accounting  `yaml:"accounting"`
+	Storage     Storage     `yaml:"storage"`
+	Limiter     Limiter     `yaml:"limiter"`
 	Admin       Admin       `yaml:"admin"`
 	Tenants     []Tenant    `yaml:"tenants"`
 	Providers   []Provider  `yaml:"providers"`
@@ -104,6 +106,44 @@ type Accounting struct {
 	// gateway stops admitting work. The in-memory usage store has no queue and
 	// ignores it.
 	UsageQueue int `yaml:"usage_queue"`
+}
+
+// Storage backends for usage records, routing decisions and policies.
+const (
+	// StorageMemory keeps them in process memory, which a restart loses. It is
+	// the default.
+	StorageMemory = "memory"
+	// StoragePostgres keeps them in PostgreSQL, so that replicas share policies
+	// and history survives a restart.
+	StoragePostgres = "postgres"
+)
+
+// Limiter backends for rate limits and daily budgets.
+const (
+	// LimiterMemory keeps them in process memory, which each replica has to
+	// itself. It is the default.
+	LimiterMemory = "memory"
+	// LimiterRedis keeps them in Redis, so that every replica shares them.
+	LimiterRedis = "redis"
+)
+
+// Storage selects where usage records, routing decisions and policies live.
+type Storage struct {
+	// Type is StorageMemory or StoragePostgres.
+	Type string `yaml:"type"`
+	// DSNEnv names the environment variable that holds the PostgreSQL
+	// connection string. It is required for postgres. The value is read at
+	// startup and never logged; the file holds only the name.
+	DSNEnv string `yaml:"dsn_env"`
+}
+
+// Limiter selects where rate limits and budgets live.
+type Limiter struct {
+	// Type is LimiterMemory or LimiterRedis.
+	Type string `yaml:"type"`
+	// URLEnv names the environment variable that holds the Redis URL. It is
+	// required for redis. The value is read at startup and never logged.
+	URLEnv string `yaml:"url_env"`
 }
 
 // Server holds HTTP server settings.

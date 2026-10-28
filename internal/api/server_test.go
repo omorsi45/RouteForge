@@ -160,7 +160,10 @@ func (l *accessLog) Write(p []byte) (int, error) {
 }
 
 // requestLines returns the "request" lines logged so far.
-func (l *accessLog) requestLines(t *testing.T) []map[string]any {
+func (l *accessLog) requestLines(t *testing.T) []map[string]any { return l.named(t, "request") }
+
+// named returns the lines logged so far with the given message.
+func (l *accessLog) named(t *testing.T, msg string) []map[string]any {
 	t.Helper()
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -173,7 +176,7 @@ func (l *accessLog) requestLines(t *testing.T) []map[string]any {
 		if err := json.Unmarshal([]byte(raw), &m); err != nil {
 			t.Fatalf("log line is not JSON: %v; line %q", err, raw)
 		}
-		if m["msg"] == "request" {
+		if m["msg"] == msg {
 			lines = append(lines, m)
 		}
 	}
@@ -414,4 +417,79 @@ func TestMethodNotAllowed(t *testing.T) {
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("status = %d, want 405", rec.Code)
 	}
+}
+
+func TestReadyzFixedStrings(t *testing.T) {
+	const detail = "dial tcp 10.1.2.3:5432: connect: connection refused"
+	ready := func(context.Context) error { return nil }
+	down := func(context.Context) error { return errors.New(detail) }
+	get := func(srv *Server) *httptest.ResponseRecorder {
+		return do(t, srv.Handler(), http.MethodGet, "/readyz", "", "", map[string]string{"X-Request-Id": "req-ready-1"})
+	}
+
+	t.Run("the body has the fixed text and the log has the detail", func(t *testing.T) {
+		logs := &accessLog{}
+		srv := newServer(t, testConfig(), nil, func(o *Options) {
+			o.Logger = slog.New(slog.NewJSONHandler(logs, nil))
+			o.ReadyChecks = []ReadyCheck{{Name: "storage", Fixed: "storage unavailable", Check: down}}
+		})
+		rec := get(srv)
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("status = %d, want 503; body %s", rec.Code, rec.Body)
+		}
+		if want := `{"status":"not_ready","failed":{"storage":"storage unavailable"}}`; strings.TrimSpace(rec.Body.String()) != want {
+			t.Errorf("body = %s, want %s", rec.Body, want)
+		}
+		if strings.Contains(rec.Body.String(), "10.1.2.3") {
+			t.Errorf("the body leaks the detail: %s", rec.Body)
+		}
+		lines := logs.named(t, "readiness check failed")
+		if len(lines) != 1 {
+			t.Fatalf("%d readiness log lines, want 1", len(lines))
+		}
+		l := lines[0]
+		if l["request_id"] != "req-ready-1" || l["check"] != "storage" || !strings.Contains(l["error"].(string), detail) {
+			t.Errorf("log line = %v, want the request id, the check name and the detail", l)
+		}
+	})
+
+	t.Run("a check that passes says nothing", func(t *testing.T) {
+		logs := &accessLog{}
+		srv := newServer(t, testConfig(), nil, func(o *Options) {
+			o.Logger = slog.New(slog.NewJSONHandler(logs, nil))
+			o.ReadyChecks = []ReadyCheck{
+				{Name: "storage", Fixed: "storage unavailable", Check: ready},
+				{Name: "limiter", Fixed: "limiter unavailable", Check: ready},
+			}
+		})
+		rec := get(srv)
+		if rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != `{"status":"ready"}` {
+			t.Errorf("status %d, body %s; want 200 ready", rec.Code, rec.Body)
+		}
+		if n := len(logs.named(t, "readiness check failed")); n != 0 {
+			t.Errorf("%d readiness failures logged for passing checks", n)
+		}
+	})
+
+	t.Run("each failing check has its own text and one without a fixed text shows its own", func(t *testing.T) {
+		srv := newServer(t, testConfig(), nil, func(o *Options) {
+			o.ReadyChecks = []ReadyCheck{
+				{Name: "storage", Fixed: "storage unavailable", Check: down},
+				{Name: "limiter", Fixed: "limiter unavailable", Check: down},
+				{Name: "policy", Check: func(context.Context) error { return errors.New("no active policy") }},
+			}
+		})
+		rec := get(srv)
+		var body struct {
+			Status string            `json:"status"`
+			Failed map[string]string `json:"failed"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("body: %v; %s", err, rec.Body)
+		}
+		want := map[string]string{"storage": "storage unavailable", "limiter": "limiter unavailable", "policy": "no active policy"}
+		if rec.Code != http.StatusServiceUnavailable || body.Status != "not_ready" || !reflect.DeepEqual(body.Failed, want) {
+			t.Errorf("status %d, body %s; want 503 with %v", rec.Code, rec.Body, want)
+		}
+	})
 }

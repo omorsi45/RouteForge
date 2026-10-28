@@ -40,7 +40,12 @@ var requestIDRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
 // ready.
 type ReadyCheck struct {
 	Name  string
-	Check func(context.Context) error // M3 adds "policy", M5 adds "storage" and "limiter"
+	Check func(context.Context) error
+	// Fixed, when it is not empty, is the text /readyz shows for this check
+	// when it fails, whatever the error says. The error then goes to the log
+	// only, with the request id, because the error of a storage or limiter
+	// backend can name hosts and users. Without Fixed /readyz shows the error.
+	Fixed string
 }
 
 // Options configures a Server.
@@ -373,7 +378,13 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), readyCheckTimeout)
 		err := c.Check(ctx)
 		cancel()
-		if err != nil {
+		switch {
+		case err == nil:
+		case c.Fixed != "":
+			failed[c.Name] = c.Fixed
+			s.logger.WarnContext(r.Context(), "readiness check failed",
+				"request_id", infoFrom(r.Context()).requestID, "check", c.Name, "error", err)
+		default:
 			failed[c.Name] = err.Error()
 		}
 	}

@@ -35,6 +35,7 @@ const (
 	CodeNotFound                  = "not_found"
 	CodeInternalError             = "internal_error"
 	CodeNoPreviousPolicy          = "no_previous_policy"
+	CodeStorageUnavailable        = "storage_unavailable"
 )
 
 // Error is an API failure that maps onto the OpenAI error envelope.
@@ -167,6 +168,12 @@ func accountingError(err error) *Error {
 // meter a request. The backend's own error text stays in the log.
 func errAccountingUnavailable() *Error {
 	return &Error{Status: http.StatusServiceUnavailable, Code: CodeAccountingUnavailable, Message: "accounting is unavailable", RetryAfter: time.Second}
+}
+
+// errStorageUnavailable is the response when the policy store did not take a
+// change. The store's own error text stays in the log.
+func errStorageUnavailable() *Error {
+	return &Error{Status: http.StatusServiceUnavailable, Code: CodeStorageUnavailable, Message: "policy storage is unavailable", RetryAfter: time.Second}
 }
 
 // fromRouterError maps a router failure to an API error.

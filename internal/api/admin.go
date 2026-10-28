@@ -136,6 +136,10 @@ func (s *Server) handleAdminUpload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.logger.ErrorContext(r.Context(), "add policy failed", "request_id", infoFrom(r.Context()).requestID, "error", err)
+		if errors.Is(err, policy.ErrPersist) {
+			writeError(w, errStorageUnavailable())
+			return
+		}
 		writeError(w, &Error{Status: http.StatusInternalServerError, Code: CodeInternalError, Message: "the policy could not be stored"})
 		return
 	}
@@ -150,7 +154,9 @@ func (s *Server) handleAdminActivate(w http.ResponseWriter, r *http.Request) {
 	}
 	act, err := s.policies.Activate(r.PathValue("version"), adminActor)
 	if err != nil {
-		if errors.Is(err, policy.ErrUnknownVersion) {
+		// The registry knows every version it can activate, so an unknown version the
+		// policy store reports is the store's failure, not the client's mistake.
+		if errors.Is(err, policy.ErrUnknownVersion) && !errors.Is(err, policy.ErrPersist) {
 			writeError(w, &Error{Status: http.StatusNotFound, Code: CodeNotFound, Message: "unknown policy version"})
 			return
 		}
@@ -181,10 +187,14 @@ func (s *Server) handleAdminRollback(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, r, http.StatusOK, activationBody(act))
 }
 
-// writeAdminFailure logs an unexpected registry error and answers 500 without
-// its text.
+// writeAdminFailure logs an unexpected registry error and answers without its
+// text: 503 when the policy store did not take the change, 500 otherwise.
 func (s *Server) writeAdminFailure(w http.ResponseWriter, r *http.Request, msg string, err error) {
 	s.logger.ErrorContext(r.Context(), msg, "request_id", infoFrom(r.Context()).requestID, "error", err)
+	if errors.Is(err, policy.ErrPersist) {
+		writeError(w, errStorageUnavailable())
+		return
+	}
 	writeError(w, &Error{Status: http.StatusInternalServerError, Code: CodeInternalError, Message: "the policy registry failed"})
 }
 

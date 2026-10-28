@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	neturl "net/url"
+	"strings"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/omorsi45/routeforge/internal/accounting"
@@ -22,6 +25,9 @@ import (
 	"github.com/omorsi45/routeforge/internal/provider/openai"
 	"github.com/omorsi45/routeforge/internal/provider/replay"
 	"github.com/omorsi45/routeforge/internal/reliability"
+	"github.com/omorsi45/routeforge/internal/store"
+	"github.com/omorsi45/routeforge/internal/store/postgres"
+	"github.com/omorsi45/routeforge/internal/store/redisstore"
 	"github.com/omorsi45/routeforge/internal/telemetry"
 )
 
@@ -34,11 +40,7 @@ const startupActor = "startup"
 // registry starts empty and the router behaves like the basic router until a
 // policy is uploaded.
 func buildRegistry(cfg *config.Config) (*policy.Registry, error) {
-	names := make([]string, len(cfg.Models))
-	for i, m := range cfg.Models {
-		names[i] = m.PolicyName
-	}
-	reg := policy.NewRegistry(names, nil)
+	reg := newRegistry(cfg)
 	if cfg.Policy.Path == "" {
 		return reg, nil
 	}
@@ -51,6 +53,75 @@ func buildRegistry(cfg *config.Config) (*policy.Registry, error) {
 	}
 	if _, err := reg.Activate(pol.Version, startupActor); err != nil {
 		return nil, fmt.Errorf("activate policy %s: %w", pol.Version, err)
+	}
+	return reg, nil
+}
+
+// newRegistry returns an empty registry that accepts the policies cfg can map
+// onto its models.
+func newRegistry(cfg *config.Config) *policy.Registry {
+	names := make([]string, len(cfg.Models))
+	for i, m := range cfg.Models {
+		names[i] = m.PolicyName
+	}
+	return policy.NewRegistry(names, nil)
+}
+
+// buildPersistedRegistry returns the policy registry for a gateway whose
+// policies live in p. The store decides what runs: when it has an active
+// policy, that one is loaded from its stored bytes and activated, and the file
+// policy, if there is one, is only saved (inactive) for later; when it has none,
+// the file policy is saved and activated with actor startup. A stored policy
+// that cannot be used stops startup rather than letting another one serve
+// silently. The registry writes through to p from here on.
+func buildPersistedRegistry(ctx context.Context, cfg *config.Config, p policy.Persister) (*policy.Registry, error) {
+	reg := newRegistry(cfg)
+	var file *policy.Policy
+	if cfg.Policy.Path != "" {
+		pol, err := policy.LoadFile(cfg.Policy.Path)
+		if err != nil {
+			return nil, err
+		}
+		file = pol
+	}
+
+	stored, ok, err := p.ActiveVersion(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("read the active policy from storage: %w", err)
+	}
+	if ok {
+		// Added and activated before the persister is attached: the store already
+		// holds both.
+		raw, err := p.LoadRaw(ctx, stored)
+		if err != nil {
+			return nil, fmt.Errorf("load policy %s from storage: %w", stored, err)
+		}
+		pol, err := policy.Load(raw)
+		if err != nil {
+			return nil, fmt.Errorf("stored policy %s: %w", stored, err)
+		}
+		if pol.Version != stored {
+			return nil, fmt.Errorf("stored policy %s holds version %s", stored, pol.Version)
+		}
+		if err := reg.Add(pol); err != nil {
+			return nil, fmt.Errorf("stored policy %s: %w", stored, err)
+		}
+		if _, err := reg.Activate(stored, startupActor); err != nil {
+			return nil, fmt.Errorf("activate stored policy %s: %w", stored, err)
+		}
+	}
+
+	reg.SetPersister(p)
+	if file == nil {
+		return reg, nil
+	}
+	if err := reg.Add(file); err != nil { // saved inactive unless the store has it
+		return nil, fmt.Errorf("%s: %w", cfg.Policy.Path, err)
+	}
+	if !ok {
+		if _, err := reg.Activate(file.Version, startupActor); err != nil {
+			return nil, fmt.Errorf("activate policy %s: %w", file.Version, err)
+		}
 	}
 	return reg, nil
 }
@@ -173,17 +244,16 @@ func buildExecutor(cfg *config.Config, providers map[string]provider.Provider, b
 	})
 }
 
-// buildAccountant returns the accountant of cfg over in-memory budgets, rate
-// limits and the given usage store, priced by prices. It admits and meters
-// requests as accounting.fail_mode says and reports to metrics, which may be
-// nil.
-func buildAccountant(cfg *config.Config, prices map[string]accounting.Price, usage accounting.UsageStore, logger *slog.Logger, metrics *telemetry.Metrics) *accounting.Accountant {
+// buildAccountant returns the accountant of cfg over the budgets, rate limits
+// and usage store of bk, priced by prices. It admits and meters requests as
+// accounting.fail_mode says and reports to metrics, which may be nil.
+func buildAccountant(cfg *config.Config, prices map[string]accounting.Price, bk *backends, logger *slog.Logger, metrics *telemetry.Metrics) *accounting.Accountant {
 	return accounting.NewAccountant(accounting.AccountantOptions{
 		Tenants:  cfg.Tenants,
 		Prices:   prices,
-		Budgets:  accounting.NewMemoryBudgets(),
-		Limiter:  accounting.NewMemoryLimiter(time.Now),
-		Usage:    usage,
+		Budgets:  bk.budgets,
+		Limiter:  bk.limiter,
+		Usage:    bk.usage,
 		FailMode: cfg.Accounting.FailMode,
 		Logger:   logger,
 		Metrics:  metrics,
@@ -267,4 +337,156 @@ func modelPrices(cfg *config.Config) (map[string]accounting.Price, error) {
 		return nil, err
 	}
 	return prices, nil
+}
+
+// Settings of the Redis client. The budget and limiter scripts are not
+// idempotent, so the client must not retry a command whose reply was lost
+// (MaxRetries of -1): a retried reservation could be counted twice. The short
+// timeouts keep a stuck Redis from holding a request; the accountant's fail
+// mode decides what its failure means.
+const (
+	redisDialTimeout  = 2 * time.Second
+	redisReadTimeout  = time.Second
+	redisWriteTimeout = time.Second
+)
+
+// backendOpenTimeout bounds connecting to PostgreSQL, applying its migrations
+// and reading the policy it holds at startup.
+const backendOpenTimeout = 30 * time.Second
+
+// policyPollInterval is how often a gateway on PostgreSQL looks for a policy
+// activated elsewhere. It is a variable so that an integration test can shorten
+// it; nothing else changes it.
+var policyPollInterval = 5 * time.Second
+
+// The fixed texts /readyz shows when the storage or limiter check fails. The
+// error itself goes to the log.
+const (
+	storageUnavailable = "storage unavailable"
+	limiterUnavailable = "limiter unavailable"
+)
+
+// backends are the stores a gateway runs on, chosen by the storage and limiter
+// sections of the configuration.
+type backends struct {
+	usage     accounting.UsageStore
+	memUsage  *accounting.MemoryUsage // usage with memory storage, otherwise nil; tests read the records from it
+	decisions store.DecisionStore
+	budgets   accounting.BudgetStore
+	limiter   accounting.RateLimiter
+	persister policy.Persister // the policy store; nil with memory storage
+	checks    []api.ReadyCheck // readiness checks of the backends that can fail
+	closers   []func(context.Context)
+}
+
+// close releases the backends in the reverse of the order they were opened.
+func (b *backends) close(ctx context.Context) {
+	for i := len(b.closers) - 1; i >= 0; i-- {
+		b.closers[i](ctx)
+	}
+}
+
+// buildBackends opens the stores cfg selects. The PostgreSQL connection string
+// and the Redis URL are read from the environment variables the configuration
+// names, through getenv, and appear in no error and no log: an error names the
+// variable. PostgreSQL is opened (and migrated) now, so an unreachable
+// database stops startup; the Redis client connects when it is first used, and
+// /readyz reports it until it can.
+func buildBackends(ctx context.Context, cfg *config.Config, getenv func(string) string, logger *slog.Logger) (*backends, error) {
+	b := &backends{}
+	if err := b.openStorage(ctx, cfg, getenv, logger); err != nil {
+		return nil, err
+	}
+	if err := b.openLimiter(cfg, getenv, logger); err != nil {
+		b.close(ctx)
+		return nil, err
+	}
+	return b, nil
+}
+
+func (b *backends) openStorage(ctx context.Context, cfg *config.Config, getenv func(string) string, logger *slog.Logger) error {
+	if cfg.Storage.Type != config.StoragePostgres {
+		mem := accounting.NewMemoryUsage(usageRecordsKept)
+		b.usage, b.memUsage = mem, mem
+		b.decisions = store.NewRing(decisionRingSize)
+		return nil
+	}
+	dsn := getenv(cfg.Storage.DSNEnv)
+	if dsn == "" {
+		return fmt.Errorf("storage.dsn_env: environment variable %s is not set", cfg.Storage.DSNEnv)
+	}
+	openCtx, cancel := context.WithTimeout(ctx, backendOpenTimeout)
+	defer cancel()
+	pg, err := postgres.Open(openCtx, dsn, postgres.Options{QueueSize: cfg.Accounting.UsageQueue, Logger: logger})
+	if err != nil {
+		return fmt.Errorf("storage.dsn_env %s: %w", cfg.Storage.DSNEnv, err)
+	}
+	b.usage, b.decisions, b.persister = pg, pg, pg
+	b.closers = append(b.closers, func(context.Context) { pg.Close() })
+	b.checks = append(b.checks, api.ReadyCheck{Name: "storage", Fixed: storageUnavailable, Check: pg.Ping})
+	return nil
+}
+
+func (b *backends) openLimiter(cfg *config.Config, getenv func(string) string, logger *slog.Logger) error {
+	if cfg.Limiter.Type != config.LimiterRedis {
+		b.budgets = accounting.NewMemoryBudgets()
+		b.limiter = accounting.NewMemoryLimiter(time.Now)
+		return nil
+	}
+	url := getenv(cfg.Limiter.URLEnv)
+	if url == "" {
+		return fmt.Errorf("limiter.url_env: environment variable %s is not set", cfg.Limiter.URLEnv)
+	}
+	opts, err := redisOptions(url)
+	if err != nil {
+		return fmt.Errorf("limiter.url_env: %s does not hold a valid Redis URL: %w", cfg.Limiter.URLEnv, err)
+	}
+	client := redis.NewClient(opts)
+	rs := redisstore.New(client)
+	b.limiter, b.budgets = rs, rs
+	password := opts.Password
+	b.closers = append(b.closers, func(context.Context) {
+		if err := client.Close(); err != nil {
+			logger.Warn("close the redis client failed", "error", redactText(err.Error(), password))
+		}
+	})
+	b.checks = append(b.checks, api.ReadyCheck{
+		Name:  "limiter",
+		Fixed: limiterUnavailable,
+		Check: func(ctx context.Context) error {
+			if err := rs.Ping(ctx); err != nil {
+				// The error is logged, with the request id, so it must not carry the password.
+				return errors.New(redactText(err.Error(), password))
+			}
+			return nil
+		},
+	})
+	return nil
+}
+
+// redisOptions parses a Redis URL and sets the client up as described at
+// redisDialTimeout. An error says what is wrong with the URL without quoting
+// it, because it may hold a password.
+func redisOptions(url string) (*redis.Options, error) {
+	opts, err := redis.ParseURL(url)
+	if err != nil {
+		var urlErr *neturl.Error
+		if errors.As(err, &urlErr) {
+			err = urlErr.Err // net/url quotes the whole URL
+		}
+		return nil, errors.New(err.Error())
+	}
+	opts.MaxRetries = -1
+	opts.DialTimeout = redisDialTimeout
+	opts.ReadTimeout = redisReadTimeout
+	opts.WriteTimeout = redisWriteTimeout
+	return opts, nil
+}
+
+// redactText blanks every occurrence of secret in text.
+func redactText(text, secret string) string {
+	if secret == "" {
+		return text
+	}
+	return strings.ReplaceAll(text, secret, "xxxxx")
 }

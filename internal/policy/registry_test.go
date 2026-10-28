@@ -1,7 +1,9 @@
 package policy
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -404,4 +406,263 @@ func TestRegistryConcurrentActiveReads(t *testing.T) {
 	if got := r.Active(); got != a {
 		t.Errorf("final Active() = %s, want A after an even number of flips", got.Version)
 	}
+}
+
+// fakePersister is a Persister that records what it is asked, in order, and
+// can be made to fail.
+type fakePersister struct {
+	mu        sync.Mutex
+	calls     []string
+	raw       map[string][]byte
+	active    string
+	hasActive bool
+
+	saveErr     error
+	activateErr error
+	activeErr   error
+	loadErr     error
+	// atActivate and atLoad run inside the corresponding call, before it
+	// answers, with no lock of the fake held.
+	atActivate func()
+	atLoad     func()
+}
+
+func newFakePersister() *fakePersister {
+	return &fakePersister{raw: make(map[string][]byte)}
+}
+
+func (f *fakePersister) SavePolicy(_ context.Context, p *Policy) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, "save "+p.Version)
+	if f.saveErr != nil {
+		return f.saveErr
+	}
+	f.raw[p.Version] = p.Raw
+	return nil
+}
+
+func (f *fakePersister) Activate(_ context.Context, version, previous, previousStatus, actor string) error {
+	f.mu.Lock()
+	hook := f.atActivate
+	f.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, fmt.Sprintf("activate %s previous=%q status=%s actor=%s", version, previous, previousStatus, actor))
+	if f.activateErr != nil {
+		return f.activateErr
+	}
+	f.active, f.hasActive = version, true
+	return nil
+}
+
+func (f *fakePersister) ActiveVersion(context.Context) (string, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.activeErr != nil {
+		return "", false, f.activeErr
+	}
+	return f.active, f.hasActive, nil
+}
+
+func (f *fakePersister) LoadRaw(_ context.Context, version string) ([]byte, error) {
+	f.mu.Lock()
+	hook := f.atLoad
+	f.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, "load "+version)
+	if f.loadErr != nil {
+		return nil, f.loadErr
+	}
+	raw, ok := f.raw[version]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", ErrUnknownVersion, version)
+	}
+	return raw, nil
+}
+
+// setActive plays another replica activating version.
+func (f *fakePersister) setActive(version string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.active, f.hasActive = version, true
+}
+
+func (f *fakePersister) callLog() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.calls)
+}
+
+func versionOrEmpty(p *Policy) string {
+	if p == nil {
+		return ""
+	}
+	return p.Version
+}
+
+func requireCalls(t *testing.T, step string, f *fakePersister, want ...string) {
+	t.Helper()
+	if got := f.callLog(); !slices.Equal(got, want) {
+		t.Fatalf("after %s: persister calls = %q, want %q", step, got, want)
+	}
+}
+
+func TestRegistryWithPersisterWritesThrough(t *testing.T) {
+	a, b := policyPair(t)
+	fp := newFakePersister()
+	r := NewRegistry(poolOrder, testClock())
+	r.SetPersister(fp)
+
+	// What the registry serves at the moment the persister is asked to write an
+	// activation: the pointer must not move before the write has succeeded.
+	var servedAtActivate []string
+	fp.atActivate = func() { servedAtActivate = append(servedAtActivate, versionOrEmpty(r.Active())) }
+
+	mustAdd(t, r, a)
+	requireCalls(t, "Add(a)", fp, "save "+a.Version)
+	mustAdd(t, r, a) // already stored: nothing to save again
+	requireCalls(t, "Add(a) again", fp, "save "+a.Version)
+	mustAdd(t, r, b)
+	requireCalls(t, "Add(b)", fp, "save "+a.Version, "save "+b.Version)
+
+	mustActivate(t, r, a, "alice")
+	mustActivate(t, r, b, "bob")
+	if _, err := r.Rollback("carol"); err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+	requireCalls(t, "activations", fp,
+		"save "+a.Version,
+		"save "+b.Version,
+		fmt.Sprintf("activate %s previous=%q status=retired actor=alice", a.Version, ""),
+		fmt.Sprintf("activate %s previous=%q status=retired actor=bob", b.Version, a.Version),
+		fmt.Sprintf("activate %s previous=%q status=inactive actor=carol", a.Version, b.Version),
+	)
+	if want := []string{"", a.Version, b.Version}; !slices.Equal(servedAtActivate, want) {
+		t.Errorf("active policy when each activation was written = %q, want %q", servedAtActivate, want)
+	}
+	if got := r.Active(); got != a {
+		t.Errorf("Active() after the rollback = %s, want %s", versionOrEmpty(got), a.Version)
+	}
+	if got := statuses(r); got[a.Version] != StatusActive || got[b.Version] != StatusInactive {
+		t.Errorf("statuses = %v, want a active and b inactive", got)
+	}
+
+	// Activating the active version is a no-op, so nothing is written.
+	mustActivate(t, r, a, "dave")
+	if got := len(fp.callLog()); got != 5 {
+		t.Errorf("a repeated activation wrote to the persister: %q", fp.callLog())
+	}
+}
+
+func TestRegistryActivateFailsWhenPersistFails(t *testing.T) {
+	a, b := policyPair(t)
+	fp := newFakePersister()
+	r := NewRegistry(poolOrder, testClock())
+	r.SetPersister(fp)
+	mustAdd(t, r, a, b)
+	mustActivate(t, r, a, "alice")
+
+	var announced []Activation
+	r.OnActivate(func(act Activation) { announced = append(announced, act) })
+	logBefore := r.Activations()
+
+	boom := errors.New("connection reset by peer")
+	fp.activateErr = boom
+	_, err := r.Activate(b.Version, "bob")
+	if !errors.Is(err, ErrPersist) || !errors.Is(err, boom) {
+		t.Fatalf("Activate with a failing persister = %v, want ErrPersist wrapping the cause", err)
+	}
+	if got := r.Active(); got != a {
+		t.Errorf("Active() = %s after a failed activation, want %s", versionOrEmpty(got), a.Version)
+	}
+	if got := statuses(r); got[a.Version] != StatusActive || got[b.Version] != StatusInactive {
+		t.Errorf("statuses = %v, want them unchanged", got)
+	}
+	if !slices.Equal(r.Activations(), logBefore) || len(announced) != 0 {
+		t.Errorf("a failed activation was logged or announced: log %v, announced %v", r.Activations(), announced)
+	}
+
+	// The failed attempt left no state behind: once the persister recovers the
+	// same activation works, and so does a rollback after it.
+	fp.activateErr = nil
+	mustActivate(t, r, b, "bob")
+	fp.activateErr = boom
+	if _, err := r.Rollback("carol"); !errors.Is(err, ErrPersist) {
+		t.Fatalf("Rollback with a failing persister = %v, want ErrPersist", err)
+	}
+	if got := r.Active(); got != b {
+		t.Errorf("Active() = %s after a failed rollback, want %s", versionOrEmpty(got), b.Version)
+	}
+	if got := statuses(r); got[a.Version] != StatusRetired || got[b.Version] != StatusActive {
+		t.Errorf("statuses after the failed rollback = %v, want a retired and b active", got)
+	}
+	fp.activateErr = nil
+	if _, err := r.Rollback("carol"); err != nil {
+		t.Fatalf("Rollback after the persister recovered: %v", err)
+	}
+	if got := r.Active(); got != a {
+		t.Errorf("Active() = %s after the rollback, want %s", versionOrEmpty(got), a.Version)
+	}
+}
+
+func TestRegistryAddFailsWhenSaveFails(t *testing.T) {
+	a, _ := policyPair(t)
+	fp := newFakePersister()
+	r := NewRegistry(poolOrder, testClock())
+	r.SetPersister(fp)
+
+	boom := errors.New("disk full")
+	fp.saveErr = boom
+	err := r.Add(a)
+	if !errors.Is(err, ErrPersist) || !errors.Is(err, boom) {
+		t.Fatalf("Add with a failing persister = %v, want ErrPersist wrapping the cause", err)
+	}
+	if len(r.List()) != 0 {
+		t.Errorf("a policy that could not be saved was stored: %v", r.List())
+	}
+	if _, err := r.Activate(a.Version, "alice"); !errors.Is(err, ErrUnknownVersion) {
+		t.Errorf("Activate of the unsaved policy = %v, want ErrUnknownVersion", err)
+	}
+
+	// A validation problem the persister finds stays a validation problem.
+	problem := &ValidationError{Path: "created_at", Problem: "must be an RFC 3339 timestamp"}
+	fp.saveErr = problem
+	err = r.Add(a)
+	if ve := requireValidationError(t, err); ve.Path != "created_at" || !errors.Is(err, ErrPersist) {
+		t.Errorf("Add = %v, want the persister's validation error, also an ErrPersist", err)
+	}
+
+	fp.saveErr = nil
+	mustAdd(t, r, a)
+	if len(r.List()) != 1 {
+		t.Errorf("Add after the persister recovered stored %d policies, want 1", len(r.List()))
+	}
+}
+
+func TestRegistryRejectsAnUnmappedModelBeforeSaving(t *testing.T) {
+	a, _ := policyPair(t)
+	fp := newFakePersister()
+	r := NewRegistry(poolOrder[:5], testClock())
+	r.SetPersister(fp)
+	requireValidationError(t, r.Add(a))
+	requireCalls(t, "rejected Add", fp)
+}
+
+func TestRegistrySetPersisterNilRemovesIt(t *testing.T) {
+	a, _ := policyPair(t)
+	fp := newFakePersister()
+	r := NewRegistry(poolOrder, testClock())
+	r.SetPersister(fp)
+	r.SetPersister(nil)
+	mustAdd(t, r, a)
+	mustActivate(t, r, a, "alice")
+	requireCalls(t, "work without a persister", fp)
 }

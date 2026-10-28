@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync"
@@ -24,6 +25,9 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
+
+	"github.com/omorsi45/routeforge/internal/accounting"
 	"github.com/omorsi45/routeforge/internal/auth"
 	"github.com/omorsi45/routeforge/internal/config"
 	"github.com/omorsi45/routeforge/internal/executor"
@@ -35,6 +39,8 @@ import (
 	"github.com/omorsi45/routeforge/internal/provider/replay"
 	"github.com/omorsi45/routeforge/internal/reliability"
 	"github.com/omorsi45/routeforge/internal/router"
+	"github.com/omorsi45/routeforge/internal/store"
+	"github.com/omorsi45/routeforge/internal/store/redisstore"
 )
 
 const wireConfigYAML = `
@@ -1285,4 +1291,542 @@ func TestServeStartupFailuresCloseListener(t *testing.T) {
 			}
 		})
 	}
+}
+
+const (
+	testRedisURLEnv = "RF_TEST_REDIS_URL"
+	testPGDSNEnv    = "RF_TEST_PG_DSN"
+)
+
+func discardLogger() *slog.Logger { return slog.New(slog.DiscardHandler) }
+
+func TestRedisOptionsCarryTheClientSettings(t *testing.T) {
+	opts, err := redisOptions("redis://:pw-for-test@cache.internal:6380/2")
+	if err != nil {
+		t.Fatalf("redisOptions: %v", err)
+	}
+	if opts.Addr != "cache.internal:6380" || opts.DB != 2 || opts.Password != "pw-for-test" {
+		t.Errorf("Addr, DB, Password = %q, %d, %q: the URL was not honored", opts.Addr, opts.DB, opts.Password)
+	}
+	// The Lua scripts are not idempotent: a client that retried a command whose
+	// reply was lost could reserve or charge twice.
+	if opts.MaxRetries != -1 {
+		t.Errorf("MaxRetries = %d, want -1 (no retries)", opts.MaxRetries)
+	}
+	if opts.DialTimeout != 2*time.Second || opts.ReadTimeout != time.Second || opts.WriteTimeout != time.Second {
+		t.Errorf("timeouts dial %v, read %v, write %v; want 2s, 1s, 1s", opts.DialTimeout, opts.ReadTimeout, opts.WriteTimeout)
+	}
+}
+
+func TestRedisOptionsDoNotQuoteTheURL(t *testing.T) {
+	for name, url := range map[string]string{
+		"bad port":   "redis://:topsecret@cache.internal:notaport/0",
+		"bad scheme": "http://:topsecret@cache.internal:6379/0",
+		"bad db":     "redis://:topsecret@cache.internal:6379/notadb",
+		"bad query":  "redis://:topsecret@cache.internal:6379/0?nosuchoption=1",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := redisOptions(url)
+			if err == nil {
+				t.Fatal("redisOptions accepted the URL")
+			}
+			if strings.Contains(err.Error(), "topsecret") {
+				t.Errorf("error %q contains the password", err)
+			}
+		})
+	}
+}
+
+func TestRedactText(t *testing.T) {
+	if got := redactText("dial redis://:abc123@h:1 failed: abc123", "abc123"); strings.Contains(got, "abc123") || !strings.Contains(got, "xxxxx") {
+		t.Errorf("redactText = %q, want every abc123 blanked", got)
+	}
+	if got := redactText("nothing to hide", ""); got != "nothing to hide" {
+		t.Errorf("redactText with no secret = %q", got)
+	}
+}
+
+func TestBuildBackendsMemory(t *testing.T) {
+	cfg := parseWireConfig(t)
+	getenv := func(name string) string {
+		t.Errorf("getenv(%q) called: the memory backends read no environment", name)
+		return ""
+	}
+	bk, err := buildBackends(context.Background(), cfg, getenv, discardLogger())
+	if err != nil {
+		t.Fatalf("buildBackends: %v", err)
+	}
+	defer bk.close(context.Background())
+	if _, ok := bk.usage.(*accounting.MemoryUsage); !ok || bk.memUsage == nil {
+		t.Errorf("usage is %T, want the memory store", bk.usage)
+	}
+	if _, ok := bk.decisions.(*store.Ring); !ok {
+		t.Errorf("decisions is %T, want the memory ring", bk.decisions)
+	}
+	if _, ok := bk.budgets.(*accounting.MemoryBudgets); !ok {
+		t.Errorf("budgets is %T, want memory", bk.budgets)
+	}
+	if _, ok := bk.limiter.(*accounting.MemoryLimiter); !ok {
+		t.Errorf("limiter is %T, want memory", bk.limiter)
+	}
+	if bk.persister != nil || len(bk.checks) != 0 {
+		t.Errorf("persister %v and checks %v, want none with memory backends", bk.persister, bk.checks)
+	}
+}
+
+func TestBuildBackendsNeedTheirEnvironment(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*config.Config)
+		env    map[string]string
+		want   []string
+		never  string // text the error must not contain
+	}{
+		{
+			name:   "postgres without its variable",
+			mutate: func(c *config.Config) { c.Storage = config.Storage{Type: config.StoragePostgres, DSNEnv: testPGDSNEnv} },
+			want:   []string{"storage.dsn_env", testPGDSNEnv + " is not set"},
+		},
+		{
+			name:   "redis without its variable",
+			mutate: func(c *config.Config) { c.Limiter = config.Limiter{Type: config.LimiterRedis, URLEnv: testRedisURLEnv} },
+			want:   []string{"limiter.url_env", testRedisURLEnv + " is not set"},
+		},
+		{
+			name:   "an unparsable postgres DSN",
+			mutate: func(c *config.Config) { c.Storage = config.Storage{Type: config.StoragePostgres, DSNEnv: testPGDSNEnv} },
+			env:    map[string]string{testPGDSNEnv: "postgres://routeforge:topsecret@localhost:notaport/db"},
+			want:   []string{"storage.dsn_env", testPGDSNEnv},
+			never:  "topsecret",
+		},
+		{
+			name:   "an unparsable redis URL",
+			mutate: func(c *config.Config) { c.Limiter = config.Limiter{Type: config.LimiterRedis, URLEnv: testRedisURLEnv} },
+			env:    map[string]string{testRedisURLEnv: "redis://:topsecret@localhost:notaport/0"},
+			want:   []string{"limiter.url_env", testRedisURLEnv, "valid Redis URL"},
+			never:  "topsecret",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := parseWireConfig(t)
+			tc.mutate(cfg)
+			_, err := buildBackends(context.Background(), cfg, func(name string) string { return tc.env[name] }, discardLogger())
+			if err == nil {
+				t.Fatal("buildBackends succeeded")
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not contain %q", err, want)
+				}
+			}
+			if tc.never != "" && strings.Contains(err.Error(), tc.never) {
+				t.Errorf("error %q contains %q", err, tc.never)
+			}
+		})
+	}
+}
+
+// redisGatewayEnv runs miniredis behind a password and returns the environment
+// that points a gateway at it.
+func redisGatewayEnv(t *testing.T) (*miniredis.Miniredis, func(string) string) {
+	t.Helper()
+	mr := miniredis.RunT(t)
+	mr.RequireAuth("topsecret")
+	url := "redis://:topsecret@" + mr.Addr() + "/0"
+	return mr, func(name string) string {
+		if name == testRedisURLEnv {
+			return url
+		}
+		return ""
+	}
+}
+
+func TestBuildBackendsRedis(t *testing.T) {
+	mr, getenv := redisGatewayEnv(t)
+	cfg := parseWireConfig(t)
+	cfg.Limiter = config.Limiter{Type: config.LimiterRedis, URLEnv: testRedisURLEnv}
+	bk, err := buildBackends(context.Background(), cfg, getenv, discardLogger())
+	if err != nil {
+		t.Fatalf("buildBackends: %v", err)
+	}
+	defer bk.close(context.Background())
+
+	limiter, ok := bk.limiter.(*redisstore.Store)
+	if !ok {
+		t.Fatalf("limiter is %T, want the Redis store", bk.limiter)
+	}
+	if budgets, ok := bk.budgets.(*redisstore.Store); !ok || budgets != limiter {
+		t.Errorf("budgets is %T, want the same Redis store as the limiter", bk.budgets)
+	}
+	if _, ok := bk.usage.(*accounting.MemoryUsage); !ok {
+		t.Errorf("usage is %T, want memory: only storage.type selects Postgres", bk.usage)
+	}
+	if len(bk.checks) != 1 || bk.checks[0].Name != "limiter" || bk.checks[0].Fixed != "limiter unavailable" {
+		t.Fatalf("checks = %+v, want one limiter check with the fixed text", bk.checks)
+	}
+
+	check := bk.checks[0].Check
+	if err := check(context.Background()); err != nil {
+		t.Fatalf("limiter check with Redis up: %v", err)
+	}
+	mr.Close()
+	err = check(context.Background())
+	if err == nil {
+		t.Fatal("limiter check passed with Redis down")
+	}
+	if strings.Contains(err.Error(), "topsecret") {
+		t.Errorf("check error %q contains the password", err)
+	}
+}
+
+// With the Redis limiter the rate limit and the budget live in Redis, where
+// every replica sees them, and the client is closed when the gateway stops.
+func TestGatewayUsesRedisForLimitsAndBudgets(t *testing.T) {
+	mr, getenv := redisGatewayEnv(t)
+	upstream, hits := scriptedUpstream(t, http.StatusOK)
+	cfg := upstreamConfig(t, upstream, "limiter:\n  type: redis\n  url_env: "+testRedisURLEnv+"\n")
+	cfg.Tenants[0].RPM = 1
+	cfg.Tenants[0].DailyBudgetUSD = 1
+	base, stop := startGatewayEnv(t, cfg, discardLogger(), getenv)
+
+	resp := post(t, base, e2eKey, chatBody("m-up", ""))
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("first request: status %d, want 200", resp.StatusCode)
+	}
+	resp = post(t, base, e2eKey, chatBody("m-up", ""))
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("second request: status %d, want 429: the limit of 1 a minute is shared through Redis", resp.StatusCode)
+	}
+	if got := hits(); got != 1 {
+		t.Errorf("upstream saw %d requests, want 1", got)
+	}
+
+	if !mr.Exists("rf:rl:{e2e}:rpm") {
+		t.Errorf("no rate limit bucket in Redis; keys %v", mr.Keys())
+	}
+	budgetKey := "rf:budget:{e2e}:" + accounting.DayKey(time.Now())
+	if got := mr.HGet(budgetKey, "spent"); got != "3000" {
+		t.Errorf("Redis %s spent = %q, want 3000 nano-USD (1 prompt and 1 completion token at 1000 and 2000)", budgetKey, got)
+	}
+	if got := mr.HGet(budgetKey, "reserved"); got != "0" {
+		t.Errorf("Redis %s reserved = %q, want 0 after settlement", budgetKey, got)
+	}
+
+	resp, err := e2eClient.Get(base + "/readyz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("/readyz with Redis up: status %d, want 200", resp.StatusCode)
+	}
+
+	if err := stop(); err != nil {
+		t.Fatalf("serve: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second) // a failure guard: the server notices a closed socket
+	for mr.CurrentConnectionCount() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d Redis connections still open after the gateway stopped", mr.CurrentConnectionCount())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestReadyzReportsALimiterOutageWithAFixedString(t *testing.T) {
+	mr, getenv := redisGatewayEnv(t)
+	upstream, _ := scriptedUpstream(t, http.StatusOK)
+	cfg := upstreamConfig(t, upstream, "limiter:\n  type: redis\n  url_env: "+testRedisURLEnv+"\n")
+	logs := &syncBuffer{}
+	base, _ := startGatewayEnv(t, cfg, slog.New(slog.NewJSONHandler(logs, nil)), getenv)
+
+	mr.Close()
+	req, err := http.NewRequest(http.MethodGet, base+"/readyz", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Request-Id", "req-ready-outage")
+	resp, err := e2eClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status %d, want 503; body %s", resp.StatusCode, body)
+	}
+	if want := `{"status":"not_ready","failed":{"limiter":"limiter unavailable"}}`; strings.TrimSpace(string(body)) != want {
+		t.Errorf("body = %s, want %s", body, want)
+	}
+	if !strings.Contains(logs.String(), `"request_id":"req-ready-outage"`) || !strings.Contains(logs.String(), "readiness check failed") {
+		t.Errorf("the failure is not in the log with the request id: %s", logs.String())
+	}
+	if strings.Contains(logs.String(), "topsecret") {
+		t.Errorf("the log contains the Redis password: %s", logs.String())
+	}
+}
+
+// startupPersister is an in-memory policy.Persister that records its calls.
+type startupPersister struct {
+	mu        sync.Mutex
+	calls     []string
+	raw       map[string][]byte
+	active    string
+	hasActive bool
+	activeErr error
+}
+
+func newStartupPersister() *startupPersister {
+	return &startupPersister{raw: make(map[string][]byte)}
+}
+
+func (p *startupPersister) SavePolicy(_ context.Context, pol *policy.Policy) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.calls = append(p.calls, "save "+pol.Version)
+	p.raw[pol.Version] = pol.Raw
+	return nil
+}
+
+func (p *startupPersister) Activate(_ context.Context, version, previous, previousStatus, actor string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.calls = append(p.calls, "activate "+version+" by "+actor)
+	p.active, p.hasActive = version, true
+	return nil
+}
+
+func (p *startupPersister) ActiveVersion(context.Context) (string, bool, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.active, p.hasActive, p.activeErr
+}
+
+func (p *startupPersister) LoadRaw(_ context.Context, version string) ([]byte, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.calls = append(p.calls, "load "+version)
+	raw, ok := p.raw[version]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", policy.ErrUnknownVersion, version)
+	}
+	return raw, nil
+}
+
+func (p *startupPersister) callLog() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.calls...)
+}
+
+// variantPolicy loads the committed policy cut down to its first trees, after
+// mutate has edited its generic tree, with its version recomputed. Different
+// edits give different versions.
+func variantPolicy(t *testing.T, mutate func(tree map[string]any)) *policy.Policy {
+	t.Helper()
+	data, err := os.ReadFile(committedPolicy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber() // number text is part of the version hash
+	var tree map[string]any
+	if err := dec.Decode(&tree); err != nil {
+		t.Fatal(err)
+	}
+	models, _ := tree["models"].([]any)
+	for _, raw := range models {
+		predictor, _ := raw.(map[string]any)["predictor"].(map[string]any)
+		trees, _ := predictor["trees"].([]any)
+		predictor["trees"] = trees[:3]
+	}
+	if mutate != nil {
+		mutate(tree)
+	}
+	render := func() []byte {
+		out, err := json.Marshal(tree)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	tree["version"] = "000000000000"
+	version, err := policy.CanonicalVersion(render())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree["version"] = version
+	p, err := policy.Load(render())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// setFirstInit changes the initial value of the first model, which gives the
+// policy another version.
+func setFirstInit(value string) func(map[string]any) {
+	return func(tree map[string]any) {
+		models, _ := tree["models"].([]any)
+		predictor, _ := models[0].(map[string]any)["predictor"].(map[string]any)
+		predictor["init"] = json.Number(value)
+	}
+}
+
+func TestBuildPersistedRegistry(t *testing.T) {
+	// The file policy is the committed one cut down; the stored one differs by
+	// an initial value.
+	file := variantPolicy(t, nil)
+	stored := variantPolicy(t, setFirstInit("0.123"))
+	if file.Version == stored.Version {
+		t.Fatal("test policies share a version")
+	}
+	poolConfigWithFile := func(t *testing.T) *config.Config {
+		t.Helper()
+		cfg := parsePoolConfig(t, "", poolPolicyNames...)
+		path := filepath.Join(t.TempDir(), "policy.json")
+		if err := os.WriteFile(path, file.Raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg.Policy.Path = path
+		return cfg
+	}
+	statusOf := func(reg *policy.Registry) map[string]string {
+		out := map[string]string{}
+		for _, e := range reg.List() {
+			out[e.Policy.Version] = e.Status
+		}
+		return out
+	}
+	equalCalls := func(t *testing.T, p *startupPersister, want ...string) {
+		t.Helper()
+		if got := p.callLog(); !reflect.DeepEqual(got, want) {
+			t.Fatalf("persister calls = %q, want %q", got, want)
+		}
+	}
+
+	t.Run("the stored active policy wins and the file policy is kept inactive", func(t *testing.T) {
+		p := newStartupPersister()
+		p.raw[stored.Version], p.active, p.hasActive = stored.Raw, stored.Version, true
+		reg, err := buildPersistedRegistry(context.Background(), poolConfigWithFile(t), p)
+		if err != nil {
+			t.Fatalf("buildPersistedRegistry: %v", err)
+		}
+		if got := reg.Active(); got == nil || got.Version != stored.Version {
+			t.Fatalf("Active() = %v, want the stored policy %s", got, stored.Version)
+		}
+		// The stored policy is loaded, not saved again; the file policy is saved,
+		// and nothing is activated in the store.
+		equalCalls(t, p, "load "+stored.Version, "save "+file.Version)
+		if got := statusOf(reg); !reflect.DeepEqual(got, map[string]string{stored.Version: "active", file.Version: "inactive"}) {
+			t.Errorf("statuses = %v", got)
+		}
+		if acts := reg.Activations(); len(acts) != 1 || acts[0].Actor != "startup" || acts[0].Version != stored.Version {
+			t.Errorf("activations = %+v, want one by startup of the stored policy", acts)
+		}
+	})
+
+	t.Run("an empty store gets the file policy, saved and activated by startup", func(t *testing.T) {
+		p := newStartupPersister()
+		reg, err := buildPersistedRegistry(context.Background(), poolConfigWithFile(t), p)
+		if err != nil {
+			t.Fatalf("buildPersistedRegistry: %v", err)
+		}
+		if got := reg.Active(); got == nil || got.Version != file.Version {
+			t.Fatalf("Active() = %v, want the file policy %s", got, file.Version)
+		}
+		equalCalls(t, p, "save "+file.Version, "activate "+file.Version+" by startup")
+	})
+
+	t.Run("a store that already runs the file policy needs no writes", func(t *testing.T) {
+		p := newStartupPersister()
+		p.raw[file.Version], p.active, p.hasActive = file.Raw, file.Version, true
+		reg, err := buildPersistedRegistry(context.Background(), poolConfigWithFile(t), p)
+		if err != nil {
+			t.Fatalf("buildPersistedRegistry: %v", err)
+		}
+		if got := reg.Active(); got == nil || got.Version != file.Version {
+			t.Fatalf("Active() = %v, want %s", got, file.Version)
+		}
+		equalCalls(t, p, "load "+file.Version)
+	})
+
+	t.Run("no file policy and an empty store leave the registry empty but persistent", func(t *testing.T) {
+		p := newStartupPersister()
+		reg, err := buildPersistedRegistry(context.Background(), parsePoolConfig(t, "", poolPolicyNames...), p)
+		if err != nil {
+			t.Fatalf("buildPersistedRegistry: %v", err)
+		}
+		if reg.Active() != nil || len(reg.List()) != 0 {
+			t.Fatalf("registry is not empty: %v", reg.List())
+		}
+		equalCalls(t, p)
+		// An upload to this registry reaches the store.
+		if err := reg.Add(stored); err != nil {
+			t.Fatal(err)
+		}
+		equalCalls(t, p, "save "+stored.Version)
+	})
+
+	t.Run("a stored policy that cannot be used stops startup", func(t *testing.T) {
+		t.Run("not a policy", func(t *testing.T) {
+			p := newStartupPersister()
+			p.raw["abc123abc123"], p.active, p.hasActive = []byte("{"), "abc123abc123", true
+			_, err := buildPersistedRegistry(context.Background(), poolConfigWithFile(t), p)
+			if err == nil || !strings.Contains(err.Error(), "abc123abc123") {
+				t.Fatalf("err = %v, want one naming the stored version", err)
+			}
+		})
+		t.Run("missing bytes", func(t *testing.T) {
+			p := newStartupPersister()
+			p.active, p.hasActive = "abc123abc123", true
+			_, err := buildPersistedRegistry(context.Background(), poolConfigWithFile(t), p)
+			if err == nil || !strings.Contains(err.Error(), "abc123abc123") {
+				t.Fatalf("err = %v, want one naming the stored version", err)
+			}
+		})
+		t.Run("another version than the one asked for", func(t *testing.T) {
+			p := newStartupPersister()
+			p.raw[stored.Version], p.active, p.hasActive = file.Raw, stored.Version, true
+			_, err := buildPersistedRegistry(context.Background(), poolConfigWithFile(t), p)
+			if err == nil || !strings.Contains(err.Error(), file.Version) {
+				t.Fatalf("err = %v, want one naming both versions", err)
+			}
+		})
+		t.Run("a model nothing is configured for", func(t *testing.T) {
+			p := newStartupPersister()
+			p.raw[stored.Version], p.active, p.hasActive = stored.Raw, stored.Version, true
+			cfg := parsePoolConfig(t, "", poolPolicyNames[:5]...)
+			_, err := buildPersistedRegistry(context.Background(), cfg, p)
+			if err == nil || !strings.Contains(err.Error(), "qwen3-235b-a22b-2507") || !strings.Contains(err.Error(), stored.Version) {
+				t.Fatalf("err = %v, want one naming the stored policy and the unmapped model", err)
+			}
+		})
+	})
+
+	t.Run("a store that cannot answer stops startup", func(t *testing.T) {
+		p := newStartupPersister()
+		p.activeErr = errors.New("connection refused")
+		_, err := buildPersistedRegistry(context.Background(), poolConfigWithFile(t), p)
+		if err == nil || !strings.Contains(err.Error(), "connection refused") {
+			t.Fatalf("err = %v, want the store's error", err)
+		}
+	})
+
+	t.Run("an unreadable file policy stops startup before the store is touched", func(t *testing.T) {
+		p := newStartupPersister()
+		cfg := parsePoolConfig(t, "", poolPolicyNames...)
+		cfg.Policy.Path = filepath.Join(t.TempDir(), "absent.json")
+		_, err := buildPersistedRegistry(context.Background(), cfg, p)
+		if err == nil || !strings.Contains(err.Error(), "read policy") {
+			t.Fatalf("err = %v, want a read error", err)
+		}
+		equalCalls(t, p)
+	})
 }

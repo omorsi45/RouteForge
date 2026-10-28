@@ -102,6 +102,13 @@ func (c *Config) ApplyDefaults() {
 		c.Accounting.UsageQueue = 10000
 	}
 
+	if c.Storage.Type == "" {
+		c.Storage.Type = StorageMemory
+	}
+	if c.Limiter.Type == "" {
+		c.Limiter.Type = LimiterMemory
+	}
+
 	for i := range c.Tenants {
 		t := &c.Tenants[i]
 		if t.Profile == "" {
