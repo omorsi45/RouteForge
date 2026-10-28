@@ -240,6 +240,112 @@ func TestValidateReplayProvider(t *testing.T) {
 	}
 }
 
+func TestReliabilityDefaults(t *testing.T) {
+	want := config.Reliability{
+		MaxAttempts:       3,
+		BackoffBase:       100 * time.Millisecond,
+		BackoffCap:        2 * time.Second,
+		RetryBudgetRatio:  0.2,
+		RetryBudgetWindow: 10 * time.Second,
+		RetryBudgetMin:    3,
+		Breaker: config.Breaker{
+			ConsecutiveFailures: 5,
+			ErrorRate:           0.5,
+			MinRequests:         10,
+			Window:              30 * time.Second,
+			OpenFor:             15 * time.Second,
+			HalfOpenProbes:      2,
+		},
+	}
+	if got := valid(t).Reliability; got != want {
+		t.Fatalf("Reliability = %+v, want %+v", got, want)
+	}
+}
+
+func TestParseReliabilitySection(t *testing.T) {
+	doc := `
+reliability:
+  max_attempts: 5
+  backoff_base: 50ms
+  retry_budget_ratio: 0.5
+  breaker:
+    consecutive_failures: 8
+    open_for: 1m
+` + minimalDoc
+	c, err := config.Parse([]byte(doc))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	r := c.Reliability
+	if r.MaxAttempts != 5 || r.BackoffBase != 50*time.Millisecond || r.RetryBudgetRatio != 0.5 {
+		t.Errorf("explicit values lost: %+v", r)
+	}
+	if r.Breaker.ConsecutiveFailures != 8 || r.Breaker.OpenFor != time.Minute {
+		t.Errorf("explicit breaker values lost: %+v", r.Breaker)
+	}
+	// Fields left out keep their defaults, one by one.
+	if r.BackoffCap != 2*time.Second || r.RetryBudgetWindow != 10*time.Second || r.RetryBudgetMin != 3 {
+		t.Errorf("defaults missing: %+v", r)
+	}
+	if r.Breaker.ErrorRate != 0.5 || r.Breaker.MinRequests != 10 || r.Breaker.Window != 30*time.Second || r.Breaker.HalfOpenProbes != 2 {
+		t.Errorf("breaker defaults missing: %+v", r.Breaker)
+	}
+
+	_, err = config.Parse([]byte("reliability: {retries: 2}\n" + minimalDoc))
+	if err == nil || !strings.Contains(err.Error(), "retries") {
+		t.Errorf("Parse with an unknown reliability field: err = %v", err)
+	}
+}
+
+func TestValidateReliability(t *testing.T) {
+	t.Run("boundary values are accepted", func(t *testing.T) {
+		for _, attempts := range []int{1, 10} {
+			c := valid(t)
+			c.Reliability.MaxAttempts = attempts
+			c.Reliability.RetryBudgetRatio = 1
+			c.Reliability.Breaker.ErrorRate = 1
+			if err := c.Validate(); err != nil {
+				t.Errorf("max_attempts %d: %v", attempts, err)
+			}
+		}
+	})
+
+	rejects := []struct {
+		name   string
+		mutate func(*config.Reliability)
+		want   string
+	}{
+		{"zero attempts", func(r *config.Reliability) { r.MaxAttempts = 0 }, "reliability.max_attempts: must be between 1 and 10"},
+		{"negative attempts", func(r *config.Reliability) { r.MaxAttempts = -1 }, "reliability.max_attempts: must be between 1 and 10"},
+		{"too many attempts", func(r *config.Reliability) { r.MaxAttempts = 11 }, "reliability.max_attempts: must be between 1 and 10"},
+		{"zero backoff base", func(r *config.Reliability) { r.BackoffBase = 0 }, "reliability.backoff_base: must be positive"},
+		{"negative backoff cap", func(r *config.Reliability) { r.BackoffCap = -time.Second }, "reliability.backoff_cap: must be positive"},
+		{"zero ratio", func(r *config.Reliability) { r.RetryBudgetRatio = 0 }, "reliability.retry_budget_ratio: must be in (0, 1]"},
+		{"ratio above one", func(r *config.Reliability) { r.RetryBudgetRatio = 1.01 }, "reliability.retry_budget_ratio: must be in (0, 1]"},
+		{"nan ratio", func(r *config.Reliability) { r.RetryBudgetRatio = math.NaN() }, "reliability.retry_budget_ratio: must be in (0, 1]"},
+		{"zero budget window", func(r *config.Reliability) { r.RetryBudgetWindow = 0 }, "reliability.retry_budget_window: must be positive"},
+		{"zero budget min", func(r *config.Reliability) { r.RetryBudgetMin = 0 }, "reliability.retry_budget_min: must be positive"},
+		{"zero consecutive failures", func(r *config.Reliability) { r.Breaker.ConsecutiveFailures = 0 }, "reliability.breaker.consecutive_failures: must be positive"},
+		{"zero error rate", func(r *config.Reliability) { r.Breaker.ErrorRate = 0 }, "reliability.breaker.error_rate: must be in (0, 1]"},
+		{"error rate above one", func(r *config.Reliability) { r.Breaker.ErrorRate = 2 }, "reliability.breaker.error_rate: must be in (0, 1]"},
+		{"nan error rate", func(r *config.Reliability) { r.Breaker.ErrorRate = math.NaN() }, "reliability.breaker.error_rate: must be in (0, 1]"},
+		{"zero min requests", func(r *config.Reliability) { r.Breaker.MinRequests = 0 }, "reliability.breaker.min_requests: must be positive"},
+		{"zero breaker window", func(r *config.Reliability) { r.Breaker.Window = 0 }, "reliability.breaker.window: must be positive"},
+		{"negative open for", func(r *config.Reliability) { r.Breaker.OpenFor = -time.Second }, "reliability.breaker.open_for: must be positive"},
+		{"zero probes", func(r *config.Reliability) { r.Breaker.HalfOpenProbes = 0 }, "reliability.breaker.half_open_probes: must be positive"},
+	}
+	for _, tc := range rejects {
+		t.Run(tc.name, func(t *testing.T) {
+			c := valid(t)
+			tc.mutate(&c.Reliability)
+			err := c.Validate()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Validate = %v, want an error containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestValidateJoinsAllErrors(t *testing.T) {
 	c := valid(t)
 	c.Tenants[0].Profile = "fast"

@@ -21,6 +21,10 @@ var (
 	maxTokensParams = []string{"max_completion_tokens", "max_tokens"}
 )
 
+// maxAttemptsLimit is the most attempts per request that reliability.max_attempts
+// may allow.
+const maxAttemptsLimit = 10
+
 // Validate checks the configuration and returns every problem found, joined,
 // each as "<yaml path>: <problem>".
 func (c *Config) Validate() error {
@@ -30,6 +34,7 @@ func (c *Config) Validate() error {
 	}
 
 	c.validateServer(add)
+	c.validateReliability(add)
 
 	if len(c.Providers) == 0 {
 		add("providers", "at least one provider is required")
@@ -69,6 +74,43 @@ func (c *Config) validateServer(add addFunc) {
 	} {
 		if !d.ok {
 			add(d.path, "must be positive")
+		}
+	}
+}
+
+func (c *Config) validateReliability(add addFunc) {
+	r := c.Reliability
+	if r.MaxAttempts < 1 || r.MaxAttempts > maxAttemptsLimit {
+		add("reliability.max_attempts", "must be between 1 and %d", maxAttemptsLimit)
+	}
+	for _, d := range []struct {
+		path string
+		ok   bool
+	}{
+		{"reliability.backoff_base", r.BackoffBase > 0},
+		{"reliability.backoff_cap", r.BackoffCap > 0},
+		{"reliability.retry_budget_window", r.RetryBudgetWindow > 0},
+		{"reliability.retry_budget_min", r.RetryBudgetMin > 0},
+		{"reliability.breaker.consecutive_failures", r.Breaker.ConsecutiveFailures > 0},
+		{"reliability.breaker.min_requests", r.Breaker.MinRequests > 0},
+		{"reliability.breaker.window", r.Breaker.Window > 0},
+		{"reliability.breaker.open_for", r.Breaker.OpenFor > 0},
+		{"reliability.breaker.half_open_probes", r.Breaker.HalfOpenProbes > 0},
+	} {
+		if !d.ok {
+			add(d.path, "must be positive")
+		}
+	}
+	// Written as the accepted range so that NaN is rejected.
+	for _, f := range []struct {
+		path string
+		ok   bool
+	}{
+		{"reliability.retry_budget_ratio", r.RetryBudgetRatio > 0 && r.RetryBudgetRatio <= 1},
+		{"reliability.breaker.error_rate", r.Breaker.ErrorRate > 0 && r.Breaker.ErrorRate <= 1},
+	} {
+		if !f.ok {
+			add(f.path, "must be in (0, 1]")
 		}
 	}
 }

@@ -24,19 +24,50 @@ var Profiles = []string{"strict", "balanced", "economy"}
 
 // Config is the full gateway configuration.
 type Config struct {
-	Server    Server     `yaml:"server"`
-	Defaults  Defaults   `yaml:"defaults"`
-	Policy    Policy     `yaml:"policy"`
-	Pricing   Pricing    `yaml:"pricing"`
-	Admin     Admin      `yaml:"admin"`
-	Tenants   []Tenant   `yaml:"tenants"`
-	Providers []Provider `yaml:"providers"`
-	Models    []Model    `yaml:"models"`
+	Server      Server      `yaml:"server"`
+	Defaults    Defaults    `yaml:"defaults"`
+	Reliability Reliability `yaml:"reliability"`
+	Policy      Policy      `yaml:"policy"`
+	Pricing     Pricing     `yaml:"pricing"`
+	Admin       Admin       `yaml:"admin"`
+	Tenants     []Tenant    `yaml:"tenants"`
+	Providers   []Provider  `yaml:"providers"`
+	Models      []Model     `yaml:"models"`
 
 	// Dir is the absolute directory of the file Load read; it is empty for
 	// a Config built by Parse. Relative file paths in the config resolve
 	// against it.
 	Dir string `yaml:"-"`
+}
+
+// Reliability holds the retry and circuit breaker settings. Unset fields take
+// the defaults of spec section 10.
+type Reliability struct {
+	MaxAttempts int           `yaml:"max_attempts"` // tries per request, the first included
+	BackoffBase time.Duration `yaml:"backoff_base"`
+	BackoffCap  time.Duration `yaml:"backoff_cap"`
+
+	// Retries are allowed while they number fewer than RetryBudgetRatio times
+	// the requests in the last RetryBudgetWindow plus RetryBudgetMin (the
+	// floor, Ruling R5, lets an isolated request fail over).
+	RetryBudgetRatio  float64       `yaml:"retry_budget_ratio"`
+	RetryBudgetWindow time.Duration `yaml:"retry_budget_window"`
+	RetryBudgetMin    int           `yaml:"retry_budget_min"`
+
+	Breaker Breaker `yaml:"breaker"`
+}
+
+// Breaker configures the per-model circuit breaker: it opens after
+// ConsecutiveFailures failures in a row, or when at least MinRequests requests
+// in the last Window failed at ErrorRate or more. It stays open for OpenFor,
+// then admits HalfOpenProbes concurrent probes.
+type Breaker struct {
+	ConsecutiveFailures int           `yaml:"consecutive_failures"`
+	ErrorRate           float64       `yaml:"error_rate"`
+	MinRequests         int           `yaml:"min_requests"`
+	Window              time.Duration `yaml:"window"`
+	OpenFor             time.Duration `yaml:"open_for"`
+	HalfOpenProbes      int           `yaml:"half_open_probes"`
 }
 
 // Admin holds the keys that may call the /admin routes, as SHA-256 digests

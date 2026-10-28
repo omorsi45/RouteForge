@@ -10,6 +10,49 @@ import (
 // bench/latency_profiles.yaml.
 const defaultReplaySeed = 20261026
 
+// applyDefaults fills the unset reliability fields with the values of spec
+// section 10 and Ruling R5 (the retry budget floor).
+func (r *Reliability) applyDefaults() {
+	if r.MaxAttempts == 0 {
+		r.MaxAttempts = 3
+	}
+	if r.BackoffBase == 0 {
+		r.BackoffBase = 100 * time.Millisecond
+	}
+	if r.BackoffCap == 0 {
+		r.BackoffCap = 2 * time.Second
+	}
+	if r.RetryBudgetRatio == 0 {
+		r.RetryBudgetRatio = 0.2
+	}
+	if r.RetryBudgetWindow == 0 {
+		r.RetryBudgetWindow = 10 * time.Second
+	}
+	if r.RetryBudgetMin == 0 {
+		r.RetryBudgetMin = 3
+	}
+
+	b := &r.Breaker
+	if b.ConsecutiveFailures == 0 {
+		b.ConsecutiveFailures = 5
+	}
+	if b.ErrorRate == 0 {
+		b.ErrorRate = 0.5
+	}
+	if b.MinRequests == 0 {
+		b.MinRequests = 10
+	}
+	if b.Window == 0 {
+		b.Window = 30 * time.Second
+	}
+	if b.OpenFor == 0 {
+		b.OpenFor = 15 * time.Second
+	}
+	if b.HalfOpenProbes == 0 {
+		b.HalfOpenProbes = 2
+	}
+}
+
 // ApplyDefaults fills every unset field with its documented default. Zero
 // values mean "unset", so it never overrides an explicit setting.
 func (c *Config) ApplyDefaults() {
@@ -46,6 +89,8 @@ func (c *Config) ApplyDefaults() {
 	if d.MaxOutputTokens == 0 {
 		d.MaxOutputTokens = 4096
 	}
+
+	c.Reliability.applyDefaults()
 
 	for i := range c.Tenants {
 		t := &c.Tenants[i]
