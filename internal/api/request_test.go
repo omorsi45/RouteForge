@@ -182,6 +182,50 @@ func TestDecodeChatRequestRejects(t *testing.T) {
 	}
 }
 
+// contentBody wraps a raw content value in a one-message request.
+func contentBody(content string) string {
+	return `{"model":"m","messages":[{"role":"user","content":` + content + `}]}`
+}
+
+// requireInvalid fails unless decoding body gives a 400 invalid_request whose
+// message contains msg.
+func requireInvalid(t *testing.T, body, msg string) {
+	t.Helper()
+	got, derr := decodeChatRequest(strings.NewReader(body))
+	if derr == nil {
+		t.Fatalf("decodeChatRequest() = %+v, want error", got)
+	}
+	if derr.Status != http.StatusBadRequest || derr.Code != CodeInvalidRequest {
+		t.Errorf("error = %d %q (%s), want 400 %q", derr.Status, derr.Code, derr.Message, CodeInvalidRequest)
+	}
+	if !strings.Contains(derr.Message, msg) {
+		t.Errorf("Message = %q, want it to contain %q", derr.Message, msg)
+	}
+}
+
+func TestContentPartWithoutTextRejected(t *testing.T) {
+	requireInvalid(t, contentBody(`[{"type":"text"}]`), "content[0].text")
+	requireInvalid(t, contentBody(`[{"type":"text","text":"a"},{"type":"text","text":null}]`), "content[1].text")
+}
+
+func TestContentPartNonStringTextRejected(t *testing.T) {
+	requireInvalid(t, contentBody(`[{"type":"text","text":5}]`), "content")
+}
+
+func TestContentPartNotObjectRejected(t *testing.T) {
+	requireInvalid(t, contentBody(`["x"]`), "content")
+}
+
+func TestContentPartEmptyTextAccepted(t *testing.T) {
+	got, derr := decodeChatRequest(strings.NewReader(contentBody(`[{"type":"text","text":""},{"type":"text","text":"b"}]`)))
+	if derr != nil {
+		t.Fatalf("decodeChatRequest() error: %+v", derr)
+	}
+	if want := "\nb"; got.Messages[0].Content != want {
+		t.Errorf("Content = %q, want %q", got.Messages[0].Content, want)
+	}
+}
+
 func TestDecodeChatRequestTooLarge(t *testing.T) {
 	big := base + `,"user":"` + strings.Repeat("x", 1024) + `"}`
 	body := http.MaxBytesReader(nil, io.NopCloser(strings.NewReader(big)), 64)

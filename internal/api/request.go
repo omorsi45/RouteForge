@@ -63,9 +63,11 @@ type wireMessage struct {
 	ToolCalls json.RawMessage `json:"tool_calls"`
 }
 
+// wirePart is one element of an array content value. Text is a pointer so a
+// missing or null text can be told apart from an empty one.
 type wirePart struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
+	Type string  `json:"type"`
+	Text *string `json:"text"`
 }
 
 func invalid(format string, args ...any) *Error {
@@ -258,7 +260,10 @@ func parseContent(i int, raw json.RawMessage) (string, *Error) {
 			if p.Type != "text" {
 				return "", unsupported("messages[%d].content[%d].type %q is not supported", i, j, p.Type)
 			}
-			texts[j] = p.Text
+			if p.Text == nil {
+				return "", invalid("messages[%d].content[%d].text must be a string", i, j)
+			}
+			texts[j] = *p.Text
 		}
 		return strings.Join(texts, "\n"), nil
 	}
