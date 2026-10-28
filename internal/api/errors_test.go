@@ -121,6 +121,31 @@ func TestFromRouterError(t *testing.T) {
 	}
 }
 
+func TestInFlightFullError(t *testing.T) {
+	rec := httptest.NewRecorder()
+	writeError(rec, errInFlightFull())
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503", rec.Code)
+	}
+	if got := rec.Header().Get("Retry-After"); got != "1" {
+		t.Errorf("Retry-After = %q, want 1", got)
+	}
+	var got struct {
+		Error struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+			Code    string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("body is not JSON: %v", err)
+	}
+	if got.Error.Code != CodeOverloaded || got.Error.Type != "server_error" || got.Error.Message == "" {
+		t.Errorf("error = %+v, want code %q, type server_error and a message", got.Error, CodeOverloaded)
+	}
+}
+
 func TestFromUpstreamError(t *testing.T) {
 	const secret = "secret upstream detail"
 	cases := []struct {

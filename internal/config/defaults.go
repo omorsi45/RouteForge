@@ -78,6 +78,9 @@ func (c *Config) ApplyDefaults() {
 	if s.ShutdownTimeout == 0 {
 		s.ShutdownTimeout = 30 * time.Second
 	}
+	if s.MaxInFlight == 0 {
+		s.MaxInFlight = 1024
+	}
 
 	d := &c.Defaults
 	if d.Profile == "" {

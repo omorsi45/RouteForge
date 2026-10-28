@@ -17,6 +17,7 @@ import (
 	"github.com/omorsi45/routeforge/internal/provider/fake"
 	"github.com/omorsi45/routeforge/internal/provider/openai"
 	"github.com/omorsi45/routeforge/internal/provider/replay"
+	"github.com/omorsi45/routeforge/internal/reliability"
 )
 
 // startupActor is recorded as the actor of the activation at startup.
@@ -117,6 +118,21 @@ func buildHealth(cfg *config.Config) *health.Registry {
 		priors[m.Name] = health.Prior{TTFTMS: lp.TTFTMS, DecodeTokensPerS: lp.DecodeTokensPerS, Jitter: lp.Jitter}
 	}
 	return health.NewRegistry(priors, health.DefaultAlpha)
+}
+
+// buildQueues returns the admission queues of the configured models, keyed by
+// configured name and sized from each model's max_concurrency, queue_size and
+// queue_timeout.
+func buildQueues(cfg *config.Config) *reliability.Queues {
+	limits := make(map[string]reliability.QueueLimit, len(cfg.Models))
+	for _, m := range cfg.Models {
+		limits[m.Name] = reliability.QueueLimit{
+			MaxConcurrency: m.MaxConcurrency,
+			QueueSize:      m.QueueSize,
+			Timeout:        m.QueueTimeout,
+		}
+	}
+	return reliability.NewQueues(limits)
 }
 
 // buildTargets binds each configured model to its provider's instance.

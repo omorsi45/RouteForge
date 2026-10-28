@@ -15,6 +15,7 @@ import (
 	"github.com/omorsi45/routeforge/internal/config"
 	"github.com/omorsi45/routeforge/internal/executor"
 	"github.com/omorsi45/routeforge/internal/policy"
+	"github.com/omorsi45/routeforge/internal/reliability"
 	"github.com/omorsi45/routeforge/internal/router"
 	"github.com/omorsi45/routeforge/internal/store"
 )
@@ -40,10 +41,11 @@ type Options struct {
 	Keys        *auth.Store
 	Router      router.Router
 	Executor    *executor.Executor
-	Decisions   store.DecisionStore // nil: a ring of 10,000 decisions
-	Policies    *policy.Registry    // the registry the router reads; may be nil, and then the admin routes do not exist
-	Logger      *slog.Logger        // nil: slog.New(slog.DiscardHandler)
-	Now         func() time.Time    // nil: time.Now
+	Decisions   store.DecisionStore   // nil: a ring of 10,000 decisions
+	Policies    *policy.Registry      // the registry the router reads; may be nil, and then the admin routes do not exist
+	InFlight    *reliability.InFlight // limits concurrent chat and explain requests; nil means no limit
+	Logger      *slog.Logger          // nil: slog.New(slog.DiscardHandler)
+	Now         func() time.Time      // nil: time.Now
 	ReadyChecks []ReadyCheck
 }
 
@@ -56,6 +58,7 @@ type Server struct {
 	exec      *executor.Executor
 	decisions store.DecisionStore
 	policies  *policy.Registry
+	inflight  *reliability.InFlight
 	logger    *slog.Logger
 	now       func() time.Time
 	checks    []ReadyCheck
@@ -72,6 +75,7 @@ func New(o Options) *Server {
 		exec:      o.Executor,
 		decisions: o.Decisions,
 		policies:  o.Policies,
+		inflight:  o.InFlight,
 		logger:    o.Logger,
 		now:       o.Now,
 		checks:    o.ReadyChecks,

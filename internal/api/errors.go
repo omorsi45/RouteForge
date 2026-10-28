@@ -131,6 +131,18 @@ func streamErrorEvent(e *Error) []byte {
 	return append(out, '\n', '\n')
 }
 
+// errInFlightFull is the response to a request that arrives while the gateway
+// is already serving its maximum number of requests. It is the gateway's own
+// overload, unlike a router ErrOverloaded, where the models' queues are full.
+func errInFlightFull() *Error {
+	return &Error{
+		Status:     http.StatusServiceUnavailable,
+		Code:       CodeOverloaded,
+		Message:    "the gateway is serving its maximum number of requests",
+		RetryAfter: time.Second,
+	}
+}
+
 // fromRouterError maps a router failure to an API error.
 func fromRouterError(err error) *Error {
 	switch {

@@ -95,6 +95,9 @@ type Server struct {
 	MaxBodyBytes      int64         `yaml:"max_body_bytes"`
 	DefaultDeadline   time.Duration `yaml:"default_deadline"`
 	ShutdownTimeout   time.Duration `yaml:"shutdown_timeout"`
+	// MaxInFlight is how many chat and explain requests the gateway serves at
+	// once; further requests get 503 overloaded.
+	MaxInFlight int `yaml:"max_inflight"`
 }
 
 // Defaults holds values inherited by tenants that leave them unset.

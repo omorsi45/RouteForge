@@ -76,6 +76,9 @@ func (c *Config) validateServer(add addFunc) {
 			add(d.path, "must be positive")
 		}
 	}
+	if s.MaxInFlight < 1 {
+		add("server.max_inflight", "must be at least 1")
+	}
 }
 
 func (c *Config) validateReliability(add addFunc) {

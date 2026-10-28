@@ -240,6 +240,35 @@ func TestValidateReplayProvider(t *testing.T) {
 	}
 }
 
+func TestServerMaxInFlight(t *testing.T) {
+	if got := valid(t).Server.MaxInFlight; got != 1024 {
+		t.Errorf("default MaxInFlight = %d, want 1024", got)
+	}
+
+	c, err := config.Parse([]byte("server: {max_inflight: 8}\n" + minimalDoc))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if c.Server.MaxInFlight != 8 {
+		t.Errorf("MaxInFlight = %d, want 8", c.Server.MaxInFlight)
+	}
+
+	for _, n := range []int{0, -1} {
+		c := valid(t)
+		c.Server.MaxInFlight = n
+		err := c.Validate()
+		if err == nil || !strings.Contains(err.Error(), "server.max_inflight: must be at least 1") {
+			t.Errorf("max_inflight %d: Validate = %v, want server.max_inflight: must be at least 1", n, err)
+		}
+	}
+
+	// A negative value in the file is rejected too, not replaced by the default.
+	_, err = config.Parse([]byte("server: {max_inflight: -3}\n" + minimalDoc))
+	if err == nil || !strings.Contains(err.Error(), "server.max_inflight: must be at least 1") {
+		t.Errorf("Parse with max_inflight -3: err = %v", err)
+	}
+}
+
 func TestReliabilityDefaults(t *testing.T) {
 	want := config.Reliability{
 		MaxAttempts:       3,

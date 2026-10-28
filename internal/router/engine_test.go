@@ -768,6 +768,68 @@ func TestEnginePinnedIneligible(t *testing.T) {
 	}
 }
 
+// A pinned request has one candidate, so a full queue for it is the case spec
+// 10 calls overloaded: the model is fine, the gateway is busy. It is not "no
+// eligible model", which tells the client to pick another model.
+func TestEnginePinnedQueueFullIsOverloaded(t *testing.T) {
+	pinned := func() *router.Request {
+		req := autoReq("", "strict")
+		req.Model = flash
+		return req
+	}
+
+	t.Run("queue full is the only reason", func(t *testing.T) {
+		w := newWorld()
+		w.signals.QueueFull = func(m string) bool { return m == flash }
+		d, err := decideWith(w.engine(t), pinned())
+
+		if !errors.Is(err, router.ErrOverloaded) {
+			t.Fatalf("err = %v, want ErrOverloaded", err)
+		}
+		if errors.Is(err, router.ErrNoEligibleModel) {
+			t.Fatalf("err = %v also matches ErrNoEligibleModel", err)
+		}
+		for _, want := range []string{flash, router.IneligibleQueueFull} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("message %q lacks %q", err.Error(), want)
+			}
+		}
+		if d == nil || d.Chosen != "" || d.Strategy != router.StrategyPinned || len(d.Candidates) != 1 {
+			t.Fatalf("decision = %+v, want the pinned candidate with its reason and no choice", d)
+		}
+		c := d.Candidates[0]
+		if c.Model != flash || c.Eligible || !slices.Equal(c.IneligibleReasons, []string{router.IneligibleQueueFull}) {
+			t.Fatalf("candidate = %+v", c)
+		}
+	})
+
+	t.Run("without an active policy", func(t *testing.T) {
+		w := newWorld()
+		w.signals.QueueFull = func(m string) bool { return m == flash }
+		_, err := decideWith(w.engineNoPolicy(t), pinned())
+		if !errors.Is(err, router.ErrOverloaded) {
+			t.Fatalf("err = %v, want ErrOverloaded", err)
+		}
+	})
+
+	t.Run("another reason as well stays no eligible model", func(t *testing.T) {
+		w := newWorld()
+		w.signals.QueueFull = func(m string) bool { return m == flash }
+		w.signals.BreakerOpen = func(m string) bool { return m == flash }
+		_, err := decideWith(w.engine(t), pinned())
+		if !errors.Is(err, router.ErrNoEligibleModel) || errors.Is(err, router.ErrOverloaded) {
+			t.Fatalf("err = %v, want ErrNoEligibleModel only", err)
+		}
+	})
+
+	t.Run("another model's full queue does not matter", func(t *testing.T) {
+		w := newWorld()
+		w.signals.QueueFull = func(m string) bool { return m == qwen }
+		d := mustDecide(t, w.engine(t), pinned())
+		wantPick(t, d, flash, router.ReasonPinned)
+	})
+}
+
 func TestEnginePinnedChecksEveryReason(t *testing.T) {
 	w := newWorld()
 	w.model(flash).ContextWindow = 10

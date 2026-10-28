@@ -8,15 +8,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/omorsi45/routeforge/internal/auth"
@@ -27,6 +31,7 @@ import (
 	"github.com/omorsi45/routeforge/internal/provider/fake"
 	"github.com/omorsi45/routeforge/internal/provider/openai"
 	"github.com/omorsi45/routeforge/internal/provider/replay"
+	"github.com/omorsi45/routeforge/internal/reliability"
 )
 
 const wireConfigYAML = `
@@ -514,6 +519,175 @@ func TestGatewayRoutesWithLatencyPriors(t *testing.T) {
 		if c.PredictedP95MS == nil || math.Abs(*c.PredictedP95MS-want) > 1e-6 {
 			t.Errorf("%s: predicted_p95_ms = %v, want %v", c.Model, c.PredictedP95MS, want)
 		}
+	}
+}
+
+func TestBuildQueues(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		cfg := parseWireConfig(t) // m-oa, m-an, m-fk
+		cfg.Models[0].MaxConcurrency, cfg.Models[0].QueueSize = 1, 0
+		cfg.Models[1].MaxConcurrency, cfg.Models[1].QueueSize, cfg.Models[1].QueueTimeout = 1, 1, 3*time.Second
+		q := buildQueues(cfg)
+		ctx := context.Background()
+
+		// m-oa: one slot and no waiting room, so it is full as soon as it is busy.
+		if q.Full("m-oa") {
+			t.Fatal("m-oa is full while idle")
+		}
+		held, err := q.Acquire(ctx, "m-oa")
+		if err != nil {
+			t.Fatalf("Acquire(m-oa): %v", err)
+		}
+		if !q.Full("m-oa") {
+			t.Error("m-oa is not full with its only slot busy and no waiting room")
+		}
+		if _, err := q.Acquire(ctx, "m-oa"); !errors.Is(err, reliability.ErrQueueFull) {
+			t.Errorf("second Acquire(m-oa) = %v, want ErrQueueFull", err)
+		}
+		held()
+
+		// m-an: one slot, one place in line and a 3s wait, from its own settings.
+		slot, err := q.Acquire(ctx, "m-an")
+		if err != nil {
+			t.Fatalf("Acquire(m-an): %v", err)
+		}
+		start := time.Now()
+		if _, err := q.Acquire(ctx, "m-an"); !errors.Is(err, reliability.ErrQueueTimeout) {
+			t.Errorf("waiting Acquire(m-an) = %v, want ErrQueueTimeout", err)
+		}
+		if got := time.Since(start); got != 3*time.Second {
+			t.Errorf("m-an waited %v, want its queue_timeout of 3s", got)
+		}
+		slot()
+
+		// m-fk keeps the defaults: 64 slots, 128 places in line.
+		var releases []func()
+		for range 64 {
+			release, err := q.Acquire(ctx, "m-fk")
+			if err != nil {
+				t.Fatalf("Acquire(m-fk): %v", err)
+			}
+			releases = append(releases, release)
+		}
+		if q.Full("m-fk") {
+			t.Error("m-fk is full with 64 slots busy and an empty line")
+		}
+		for _, release := range releases {
+			release()
+		}
+	})
+}
+
+func TestBuildQueuesCoversEveryModel(t *testing.T) {
+	cfg := parsePoolConfig(t, "m-", poolPolicyNames...)
+	q := buildQueues(cfg)
+	for _, m := range cfg.Models {
+		release, err := q.Acquire(context.Background(), m.Name)
+		if err != nil {
+			t.Errorf("Acquire(%s): %v", m.Name, err)
+			continue
+		}
+		release()
+	}
+}
+
+// holdingUpstream is an OpenAI-style upstream that holds every request until
+// release is closed. entered is closed when the first request arrives.
+func holdingUpstream(t *testing.T) (url string, entered <-chan struct{}, release func()) {
+	t.Helper()
+	enteredCh := make(chan struct{})
+	releaseCh := make(chan struct{})
+	var enteredOnce, releaseOnce sync.Once
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		enteredOnce.Do(func() { close(enteredCh) })
+		select {
+		case <-releaseCh:
+		case <-r.Context().Done():
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"c-1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+	}))
+	t.Cleanup(srv.Close)
+	release = func() { releaseOnce.Do(func() { close(releaseCh) }) }
+	return srv.URL, enteredCh, release
+}
+
+func TestGatewayLimitsInFlightRequests(t *testing.T) {
+	upstream, entered, release := holdingUpstream(t)
+	cfg, err := config.Parse([]byte(fmt.Sprintf(`
+server:
+  max_inflight: 1
+tenants:
+  - name: e2e
+    api_key_sha256:
+      - %s
+providers:
+  - name: up
+    type: openai
+    base_url: %s/v1
+models:
+  - name: m-up
+    provider: up
+    input_per_mtok: 1
+    output_per_mtok: 2
+`, auth.HashKey(e2eKey), upstream)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, _ := startGatewayConfig(t, cfg, slog.New(slog.DiscardHandler))
+	// Cleanups run last in, first out: free the held request before the
+	// gateway's own shutdown waits for it.
+	t.Cleanup(release)
+
+	status := make(chan int, 1)
+	go func() {
+		req, err := http.NewRequest(http.MethodPost, base+"/v1/chat/completions", strings.NewReader(chatBody("m-up", "")))
+		if err != nil {
+			status <- -1
+			return
+		}
+		req.Header.Set("Authorization", "Bearer "+e2eKey)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := e2eClient.Do(req)
+		if err != nil {
+			status <- -1
+			return
+		}
+		_ = resp.Body.Close()
+		status <- resp.StatusCode
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second): // a failure guard, not a wait
+		t.Fatal("the first request never reached the upstream")
+	}
+
+	resp := post(t, base, e2eKey, chatBody("m-up", ""))
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("second request status = %d, want 503 while max_inflight 1 is held", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Retry-After"); got != "1" {
+		t.Errorf("Retry-After = %q, want 1", got)
+	}
+	var env struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil || env.Error.Code != "overloaded" {
+		t.Errorf("error body code = %q (decode error %v), want overloaded", env.Error.Code, err)
+	}
+
+	release()
+	select {
+	case got := <-status:
+		if got != http.StatusOK {
+			t.Fatalf("held request status = %d, want 200", got)
+		}
+	case <-time.After(5 * time.Second): // a failure guard, not a wait
+		t.Fatal("the held request never finished")
 	}
 }
 

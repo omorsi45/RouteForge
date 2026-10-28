@@ -74,7 +74,9 @@ type chatResponse struct {
 }
 
 // chatCall is a chat request that passed authentication, header and body
-// validation. The caller owns cancel.
+// validation. The caller owns cancel, which ends the request context and also
+// frees the request's slot of the in-flight limit, so it must be called once
+// the response is done, a stream included.
 type chatCall struct {
 	req    *ChatRequest
 	preq   provider.Request // what the provider is asked
@@ -83,11 +85,38 @@ type chatCall struct {
 	cancel context.CancelFunc
 }
 
+// acquireInFlight takes a slot of the global in-flight limit. The returned
+// release is never nil when aerr is nil. Without a limit it frees nothing.
+func (s *Server) acquireInFlight() (release func(), aerr *Error) {
+	if s.inflight == nil {
+		return func() {}, nil
+	}
+	release, ok := s.inflight.TryAcquire()
+	if !ok {
+		return nil, errInFlightFull()
+	}
+	return release, nil
+}
+
 // readChat authenticates r, validates its headers and body and builds the
 // provider and router requests. Chat and explain both start here, so they
-// apply the same rules. The feature text is computed once and shared by the
-// router (scoring, sizes) and, later, accounting and replay keys.
+// apply the same rules and share the in-flight limit. The feature text is
+// computed once and shared by the router (scoring, sizes) and, later,
+// accounting and replay keys.
 func (s *Server) readChat(w http.ResponseWriter, r *http.Request) (*chatCall, *Error) {
+	// The slot comes first, so a gateway at its limit refuses before it spends
+	// anything on the request, and it covers reading the body.
+	release, aerr := s.acquireInFlight()
+	if aerr != nil {
+		return nil, aerr
+	}
+	ok := false
+	defer func() {
+		if !ok {
+			release()
+		}
+	}()
+
 	tenant, aerr := s.authenticate(r)
 	if aerr != nil {
 		return nil, aerr
@@ -105,7 +134,6 @@ func (s *Server) readChat(w http.ResponseWriter, r *http.Request) (*chatCall, *E
 	// other.
 	deadline := time.Now().Add(budget)
 	ctx, cancel := context.WithDeadline(r.Context(), deadline)
-	ok := false
 	defer func() {
 		if !ok {
 			cancel()
@@ -155,8 +183,11 @@ func (s *Server) readChat(w http.ResponseWriter, r *http.Request) (*chatCall, *E
 			PromptBytes: len(text),
 			Text:        text,
 		},
-		ctx:    ctx,
-		cancel: cancel,
+		ctx: ctx,
+		cancel: func() {
+			cancel()
+			release()
+		},
 	}, nil
 }
 

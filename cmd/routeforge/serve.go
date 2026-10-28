@@ -15,6 +15,7 @@ import (
 	"github.com/omorsi45/routeforge/internal/auth"
 	"github.com/omorsi45/routeforge/internal/config"
 	"github.com/omorsi45/routeforge/internal/executor"
+	"github.com/omorsi45/routeforge/internal/reliability"
 	"github.com/omorsi45/routeforge/internal/router"
 	"github.com/omorsi45/routeforge/internal/store"
 )
@@ -24,8 +25,8 @@ import (
 const decisionRingSize = 10000
 
 // buildGateway constructs the HTTP surface over cfg: providers, prices, the
-// policy registry, the latency estimators and the routing engine. Without a
-// policy the engine routes like the basic router.
+// policy registry, the latency estimators, the model queues and the routing
+// engine. Without a policy the engine routes like the basic router.
 func buildGateway(cfg *config.Config, getenv func(string) string, logger *slog.Logger) (*api.Server, error) {
 	// No client Timeout: streams outlive any fixed value, so deadlines come
 	// from request contexts.
@@ -43,6 +44,7 @@ func buildGateway(cfg *config.Config, getenv func(string) string, logger *slog.L
 		return nil, err
 	}
 	latency := buildHealth(cfg)
+	queues := buildQueues(cfg)
 
 	opts := api.Options{
 		Config: cfg,
@@ -51,11 +53,12 @@ func buildGateway(cfg *config.Config, getenv func(string) string, logger *slog.L
 			Models:   cfg.Models,
 			Prices:   prices,
 			Policies: reg,
-			Signals:  router.Signals{PredictedP95MS: latency.PredictedP95MS},
+			Signals:  router.Signals{PredictedP95MS: latency.PredictedP95MS, QueueFull: queues.Full},
 		}),
 		Executor:  executor.New(buildTargets(cfg, providers), nil),
 		Decisions: store.NewRing(decisionRingSize),
 		Policies:  reg,
+		InFlight:  reliability.NewInFlight(cfg.Server.MaxInFlight),
 		Logger:    logger,
 	}
 	if cfg.Policy.Path != "" {

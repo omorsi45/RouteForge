@@ -267,7 +267,15 @@ func (e *Engine) routePinned(ctx context.Context, req *Request, d *Decision) err
 	o.reasons = e.ineligibility(ev, o)
 	d.Candidates = append(d.Candidates, o.candidate())
 	if !o.eligible() {
-		return fmt.Errorf("%w: %q: %s", ErrNoEligibleModel, m.Name, strings.Join(o.reasons, ", "))
+		// A pinned request has one candidate, so a full queue as its only
+		// reason is the overload of spec 10: the model is fine and the gateway
+		// is busy. Any other reason, or a second one, leaves the request
+		// without an eligible model.
+		sentinel := ErrNoEligibleModel
+		if slices.Equal(o.reasons, []string{IneligibleQueueFull}) {
+			sentinel = ErrOverloaded
+		}
+		return fmt.Errorf("%w: %q: %s", sentinel, m.Name, strings.Join(o.reasons, ", "))
 	}
 	d.Chosen, d.Reason = m.Name, ReasonPinned
 	return nil
