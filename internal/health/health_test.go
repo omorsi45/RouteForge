@@ -27,7 +27,7 @@ func TestPriorPredictionMatchesTrainerFormula(t *testing.T) {
 func TestPriorPredictionAcrossProfiles(t *testing.T) {
 	priors := map[string]Prior{
 		"qwen":   {TTFTMS: 200, DecodeTokensPerS: 120, Jitter: 0.1},
-		"claude": {TTFTMS: 700, DecodeTokensPerS: 45, Jitter: 0.1},
+		"slow":   {TTFTMS: 700, DecodeTokensPerS: 45, Jitter: 0.1},
 		"steady": {TTFTMS: 500, DecodeTokensPerS: 75, Jitter: 0},
 		"jumpy":  {TTFTMS: 300, DecodeTokensPerS: 105, Jitter: 0.5},
 	}
