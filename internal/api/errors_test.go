@@ -107,6 +107,7 @@ func TestFromRouterError(t *testing.T) {
 		{"model not allowed", fmt.Errorf("%w: x", router.ErrModelNotAllowed), http.StatusForbidden, CodeModelNotAllowed, "model not allowed: x", 0},
 		{"strategy unavailable", fmt.Errorf("%w: x", router.ErrStrategyUnavailable), http.StatusBadRequest, CodeInvalidRequest, "strategy not available: x", 0},
 		{"no eligible model", fmt.Errorf("%w: x", router.ErrNoEligibleModel), http.StatusServiceUnavailable, CodeNoEligibleModel, "no eligible model: x", time.Second},
+		{"overloaded", fmt.Errorf("%w: x", router.ErrOverloaded), http.StatusServiceUnavailable, CodeOverloaded, "overloaded: x", time.Second},
 		{"other", fmt.Errorf("disk on fire"), http.StatusBadGateway, CodeUpstreamError, "routing failed", 0},
 	}
 	for _, tc := range cases {

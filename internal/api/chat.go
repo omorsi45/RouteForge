@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/omorsi45/routeforge/internal/config"
+	"github.com/omorsi45/routeforge/internal/policy"
 	"github.com/omorsi45/routeforge/internal/provider"
 	"github.com/omorsi45/routeforge/internal/router"
 )
@@ -72,38 +73,51 @@ type chatResponse struct {
 	RouteForge routeforgeExt `json:"routeforge"`
 }
 
-func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
-	info := infoFrom(r.Context())
+// chatCall is a chat request that passed authentication, header and body
+// validation. The caller owns cancel.
+type chatCall struct {
+	req    *ChatRequest
+	preq   provider.Request // what the provider is asked
+	rreq   *router.Request  // what the router is asked
+	ctx    context.Context  // carries the request deadline
+	cancel context.CancelFunc
+}
 
+// readChat authenticates r, validates its headers and body and builds the
+// provider and router requests. Chat and explain both start here, so they
+// apply the same rules. The feature text is computed once and shared by the
+// router (scoring, sizes) and, later, accounting and replay keys.
+func (s *Server) readChat(w http.ResponseWriter, r *http.Request) (*chatCall, *Error) {
 	tenant, aerr := s.authenticate(r)
 	if aerr != nil {
-		writeError(w, aerr)
-		return
+		return nil, aerr
 	}
 	profile, strategy, aerr := routingHeaders(r, tenant)
 	if aerr != nil {
-		writeError(w, aerr)
-		return
+		return nil, aerr
 	}
 	budget, aerr := s.requestBudget(r, tenant)
 	if aerr != nil {
-		writeError(w, aerr)
-		return
+		return nil, aerr
 	}
 
 	// The context deadline runs on the real clock: the context package has no
 	// other.
 	deadline := time.Now().Add(budget)
 	ctx, cancel := context.WithDeadline(r.Context(), deadline)
-	defer cancel()
+	ok := false
+	defer func() {
+		if !ok {
+			cancel()
+		}
+	}()
 	rc := http.NewResponseController(w)
 	s.setConnDeadline(r, rc.SetReadDeadline, "read", deadline)
 	s.setConnDeadline(r, rc.SetWriteDeadline, "write", deadline.Add(writeGrace))
 
 	maxBody := s.cfg.Server.MaxBodyBytes
 	if r.ContentLength > maxBody {
-		writeError(w, &Error{Status: http.StatusRequestEntityTooLarge, Code: CodeRequestTooLarge, Message: "request body is too large"})
-		return
+		return nil, &Error{Status: http.StatusRequestEntityTooLarge, Code: CodeRequestTooLarge, Message: "request body is too large"}
 	}
 	req, aerr := decodeChatRequest(http.MaxBytesReader(w, r.Body, maxBody))
 	// The read deadline only guards the body read. Once the body is in,
@@ -111,32 +125,51 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	// cancel r.Context(), making a gateway deadline look like a client leaving.
 	s.setConnDeadline(r, rc.SetReadDeadline, "read", deadline.Add(writeGrace))
 	if aerr != nil {
-		writeError(w, aerr)
-		return
+		return nil, aerr
 	}
 
 	maxTokens := tenant.MaxOutputTokens
 	if req.MaxTokens != nil {
 		maxTokens = min(maxTokens, *req.MaxTokens)
 	}
-	preq := provider.Request{
-		Messages:    req.Messages,
-		MaxTokens:   maxTokens,
-		Temperature: req.Temperature,
-		TopP:        req.TopP,
-		Stop:        req.Stop,
-		User:        req.User,
-	}
+	text := policy.FeatureText(req.Messages)
+	ok = true
+	return &chatCall{
+		req: req,
+		preq: provider.Request{
+			Messages:    req.Messages,
+			MaxTokens:   maxTokens,
+			Temperature: req.Temperature,
+			TopP:        req.TopP,
+			Stop:        req.Stop,
+			User:        req.User,
+		},
+		rreq: &router.Request{
+			Tenant:      tenant,
+			Model:       req.Model,
+			Strategy:    strategy,
+			Profile:     profile,
+			Messages:    req.Messages,
+			MaxTokens:   maxTokens,
+			Deadline:    deadline,
+			PromptBytes: len(text),
+			Text:        text,
+		},
+		ctx:    ctx,
+		cancel: cancel,
+	}, nil
+}
 
-	d, err := s.router.Decide(ctx, &router.Request{
-		Tenant:    tenant,
-		Model:     req.Model,
-		Strategy:  strategy,
-		Profile:   profile,
-		Messages:  req.Messages,
-		MaxTokens: maxTokens,
-		Deadline:  deadline,
-	})
+func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
+	info := infoFrom(r.Context())
+	call, aerr := s.readChat(w, r)
+	if aerr != nil {
+		writeError(w, aerr)
+		return
+	}
+	defer call.cancel()
+
+	d, err := s.router.Decide(call.ctx, call.rreq)
 	if err != nil {
 		writeError(w, fromRouterError(err))
 		return
@@ -153,20 +186,23 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		completionID: "chatcmpl-" + randHex(12),
 		created:      s.now().Unix(),
 		decision:     d,
-		includeUsage: req.IncludeUsage,
-		deadlineCtx:  ctx,
+		includeUsage: call.req.IncludeUsage,
+		deadlineCtx:  call.ctx,
 		clientCtx:    r.Context(),
 	}
-	if req.Stream {
-		s.serveStream(w, r, st, preq)
+	if call.req.Stream {
+		s.serveStream(w, r, st, call.preq)
 		return
 	}
-	s.serveJSON(w, r, st, preq)
+	s.serveJSON(w, r, st, call.preq)
 }
 
 // serveJSON runs the non-streaming call and writes the completion.
 func (s *Server) serveJSON(w http.ResponseWriter, r *http.Request, st *chatState, preq provider.Request) {
 	res, err := s.exec.Complete(st.deadlineCtx, st.decision, preq)
+	// The executor has recorded the attempt, so the decision is final. Store
+	// it before replying so a client that has the response can read it back.
+	s.storeDecision(r, st.decision)
 	if err != nil {
 		if aerr := st.failure(err); aerr != nil {
 			writeError(w, aerr)

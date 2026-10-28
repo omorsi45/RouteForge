@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -21,6 +22,7 @@ import (
 	"github.com/omorsi45/routeforge/internal/auth"
 	"github.com/omorsi45/routeforge/internal/config"
 	"github.com/omorsi45/routeforge/internal/provider/fake"
+	"github.com/omorsi45/routeforge/internal/router"
 )
 
 const e2eKey = "test-key-e2e"
@@ -65,15 +67,25 @@ providers:
 models:
   - name: fast
     provider: fast
+    input_per_mtok: 1
+    output_per_mtok: 2
   - name: strong
     provider: strong
     strongest: true
+    input_per_mtok: 1
+    output_per_mtok: 2
   - name: flaky
     provider: flaky
+    input_per_mtok: 1
+    output_per_mtok: 2
   - name: nousage
     provider: nousage
+    input_per_mtok: 1
+    output_per_mtok: 2
   - name: slow
     provider: slow
+    input_per_mtok: 1
+    output_per_mtok: 2
 `, auth.HashKey(e2eKey))
 }
 
@@ -113,6 +125,12 @@ func startGatewayWithLogger(t *testing.T, logger *slog.Logger) (baseURL string, 
 	if err != nil {
 		t.Fatal(err)
 	}
+	return startGatewayConfig(t, cfg, logger)
+}
+
+// startGatewayConfig is startGateway over a configuration the caller built.
+func startGatewayConfig(t *testing.T, cfg *config.Config, logger *slog.Logger) (baseURL string, stop func() error) {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -525,5 +543,134 @@ func TestServeGracefulShutdownDrains(t *testing.T) {
 	if resp, err := client.Get(base + "/readyz"); err == nil {
 		_ = resp.Body.Close()
 		t.Fatalf("GET /readyz after stop succeeded with %d, want a connection error", resp.StatusCode)
+	}
+}
+
+// demoKey is the bearer value deploy/configs/policy-fake.yaml documents.
+const demoKey = "rf_local_demo_only"
+
+var policyVersionRE = regexp.MustCompile(`^[0-9a-f]{12}$`)
+
+// apiRequest sends one request with key and returns the response and body.
+func apiRequest(t *testing.T, method, url, key, body string) (*http.Response, []byte) {
+	t.Helper()
+	var rd io.Reader
+	if body != "" {
+		rd = strings.NewReader(body)
+	}
+	req, err := http.NewRequest(method, url, rd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := e2eClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp, raw
+}
+
+// e2eDecision is the part of a decision record this test reads.
+type e2eDecision struct {
+	ID            string `json:"id"`
+	PolicyVersion string `json:"policy_version"`
+	Strategy      string `json:"strategy"`
+	Chosen        string `json:"chosen"`
+	Candidates    []struct {
+		Model string   `json:"model"`
+		P     *float64 `json:"p"`
+		LCB   *float64 `json:"lcb"`
+	} `json:"candidates"`
+	Attempts []struct {
+		Model   string `json:"model"`
+		Outcome string `json:"outcome"`
+	} `json:"attempts"`
+}
+
+func TestServeWithPolicyFakeConfig(t *testing.T) {
+	cfg, err := config.Load("../../deploy/configs/policy-fake.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The shipped config simulates provider latency; the test does not wait
+	// for it.
+	for i := range cfg.Providers {
+		cfg.Providers[i].Fake.TTFT = 0
+		cfg.Providers[i].Fake.PerToken = 0
+	}
+	// startGatewayConfig returns once /readyz answers 200, so the policy
+	// readiness check has passed.
+	base, stop := startGatewayConfig(t, cfg, slog.New(slog.DiscardHandler))
+
+	const body = `{"model":"routeforge-auto","messages":[{"role":"user","content":"hello"}]}`
+	resp, raw := apiRequest(t, http.MethodPost, base+"/v1/chat/completions", demoKey, body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("chat status %d, body %s", resp.StatusCode, raw)
+	}
+	version := resp.Header.Get("X-RouteForge-Policy-Version")
+	if !policyVersionRE.MatchString(version) {
+		t.Errorf("X-RouteForge-Policy-Version = %q, want 12 lowercase hex characters", version)
+	}
+	reason := resp.Header.Get("X-RouteForge-Reason")
+	if reason != router.ReasonCheapestPassing && reason != router.ReasonEscalated {
+		t.Errorf("X-RouteForge-Reason = %q, want a quality reason", reason)
+	}
+
+	t.Run("decision record", func(t *testing.T) {
+		id := resp.Header.Get("X-RouteForge-Decision-Id")
+		r, raw := apiRequest(t, http.MethodGet, base+"/v1/routing/decisions/"+id, demoKey, "")
+		if r.StatusCode != http.StatusOK {
+			t.Fatalf("status %d, body %s", r.StatusCode, raw)
+		}
+		var d e2eDecision
+		if err := json.Unmarshal(raw, &d); err != nil {
+			t.Fatalf("decode %s: %v", raw, err)
+		}
+		if d.ID != id || d.PolicyVersion != version || d.Strategy != router.StrategyQuality {
+			t.Errorf("id/version/strategy = %q/%q/%q, want %q/%q/quality", d.ID, d.PolicyVersion, d.Strategy, id, version)
+		}
+		if d.Chosen != resp.Header.Get("X-RouteForge-Model") {
+			t.Errorf("chosen %q, served by %q", d.Chosen, resp.Header.Get("X-RouteForge-Model"))
+		}
+		if len(d.Candidates) != 6 {
+			t.Fatalf("got %d candidates, want 6", len(d.Candidates))
+		}
+		for _, c := range d.Candidates {
+			if c.P == nil || c.LCB == nil {
+				t.Errorf("%s: p/lcb = %v/%v, want both set", c.Model, c.P, c.LCB)
+			}
+		}
+		if len(d.Attempts) != 1 || d.Attempts[0].Outcome != router.OutcomeOK {
+			t.Errorf("attempts = %+v, want one ok attempt", d.Attempts)
+		}
+	})
+
+	t.Run("explain", func(t *testing.T) {
+		r, raw := apiRequest(t, http.MethodPost, base+"/v1/routing/explain", demoKey, body)
+		if r.StatusCode != http.StatusOK {
+			t.Fatalf("status %d, body %s", r.StatusCode, raw)
+		}
+		var d e2eDecision
+		if err := json.Unmarshal(raw, &d); err != nil {
+			t.Fatalf("decode %s: %v", raw, err)
+		}
+		if d.PolicyVersion != version || len(d.Candidates) != 6 || len(d.Attempts) != 0 {
+			t.Errorf("version/candidates/attempts = %q/%d/%d, want %q/6/0", d.PolicyVersion, len(d.Candidates), len(d.Attempts), version)
+		}
+		if r, _ := apiRequest(t, http.MethodGet, base+"/v1/routing/decisions/"+d.ID, demoKey, ""); r.StatusCode != http.StatusNotFound {
+			t.Errorf("GET of an explained decision: status %d, want 404", r.StatusCode)
+		}
+	})
+
+	if err := stop(); err != nil {
+		t.Fatal(err)
 	}
 }

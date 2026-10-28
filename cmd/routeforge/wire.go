@@ -1,18 +1,65 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
 
 	"github.com/omorsi45/routeforge/internal/accounting"
+	"github.com/omorsi45/routeforge/internal/api"
 	"github.com/omorsi45/routeforge/internal/config"
 	"github.com/omorsi45/routeforge/internal/executor"
+	"github.com/omorsi45/routeforge/internal/policy"
 	"github.com/omorsi45/routeforge/internal/provider"
 	"github.com/omorsi45/routeforge/internal/provider/anthropic"
 	"github.com/omorsi45/routeforge/internal/provider/fake"
 	"github.com/omorsi45/routeforge/internal/provider/openai"
 )
+
+// startupActor is recorded as the actor of the activation at startup.
+const startupActor = "startup"
+
+// buildRegistry returns the policy registry for cfg. A policy may only use
+// models that some configured model names as its policy_name. When
+// policy.path is set the policy is loaded, added and activated; otherwise the
+// registry starts empty and the router behaves like the basic router until a
+// policy is uploaded.
+func buildRegistry(cfg *config.Config) (*policy.Registry, error) {
+	names := make([]string, len(cfg.Models))
+	for i, m := range cfg.Models {
+		names[i] = m.PolicyName
+	}
+	reg := policy.NewRegistry(names, nil)
+	if cfg.Policy.Path == "" {
+		return reg, nil
+	}
+	pol, err := policy.LoadFile(cfg.Policy.Path)
+	if err != nil {
+		return nil, err
+	}
+	if err := reg.Add(pol); err != nil {
+		return nil, fmt.Errorf("%s: %w", cfg.Policy.Path, err)
+	}
+	if _, err := reg.Activate(pol.Version, startupActor); err != nil {
+		return nil, fmt.Errorf("activate policy %s: %w", pol.Version, err)
+	}
+	return reg, nil
+}
+
+// policyReadyCheck fails readiness while reg has no active policy. The text
+// is fixed so /readyz does not echo internals.
+func policyReadyCheck(reg *policy.Registry) api.ReadyCheck {
+	return api.ReadyCheck{
+		Name: "policy",
+		Check: func(context.Context) error {
+			if reg.Active() == nil {
+				return errors.New("no active policy")
+			}
+			return nil
+		},
+	}
+}
 
 // buildProviders constructs every configured provider, keyed by provider
 // name. A provider whose api_key_env names an unset or empty variable fails

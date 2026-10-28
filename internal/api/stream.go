@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"sync"
 
 	"github.com/omorsi45/routeforge/internal/provider"
 )
@@ -102,18 +103,24 @@ func (c *chunkWriter) encode(ev provider.StreamEvent) ([]byte, error) {
 func (s *Server) serveStream(w http.ResponseWriter, r *http.Request, st *chatState, preq provider.Request) {
 	stream, err := s.exec.Stream(st.deadlineCtx, st.decision, preq)
 	if err != nil {
+		s.storeDecision(r, st.decision) // the executor recorded the failed attempt
 		if aerr := st.failure(err); aerr != nil {
 			writeError(w, aerr)
 		}
 		return
 	}
-	// Closing ends the upstream call and records the attempt. The deferred
-	// cancel in handleChat then releases the request context on every path.
-	defer func() {
+	// finish closes the stream, which ends the upstream call and records the
+	// attempt, and only then stores the decision (Ruling C7). It runs before
+	// the last frame is written, so a client that reads the end of the stream
+	// can fetch its decision at once, and from a defer on every other path.
+	// The deferred cancel in handleChat then releases the request context.
+	finish := sync.OnceFunc(func() {
 		if err := stream.Close(); err != nil {
 			s.logger.WarnContext(r.Context(), "close provider stream failed", "request_id", st.reqID, "error", err)
 		}
-	}()
+		s.storeDecision(r, st.decision)
+	})
+	defer finish()
 
 	rc := http.NewResponseController(w)
 	flush := func() bool {
@@ -141,6 +148,7 @@ func (s *Server) serveStream(w http.ResponseWriter, r *http.Request, st *chatSta
 	for {
 		ev, err := stream.Recv()
 		if err != nil {
+			finish() // the stream is over; store before the last frame goes out
 			if errors.Is(err, io.EOF) {
 				if _, werr := io.WriteString(w, "data: [DONE]\n\n"); werr == nil {
 					flush()

@@ -14,11 +14,16 @@ import (
 	"github.com/omorsi45/routeforge/internal/auth"
 	"github.com/omorsi45/routeforge/internal/config"
 	"github.com/omorsi45/routeforge/internal/executor"
+	"github.com/omorsi45/routeforge/internal/policy"
 	"github.com/omorsi45/routeforge/internal/router"
+	"github.com/omorsi45/routeforge/internal/store"
 )
 
 // readyCheckTimeout bounds each readiness check.
 const readyCheckTimeout = 2 * time.Second
+
+// defaultDecisionCapacity is how many decisions the default store keeps.
+const defaultDecisionCapacity = 10000
 
 var requestIDRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
 
@@ -35,33 +40,42 @@ type Options struct {
 	Keys        *auth.Store
 	Router      router.Router
 	Executor    *executor.Executor
-	Logger      *slog.Logger     // nil: slog.New(slog.DiscardHandler)
-	Now         func() time.Time // nil: time.Now
+	Decisions   store.DecisionStore // nil: a ring of 10,000 decisions
+	Policies    *policy.Registry    // the registry the router reads; may be nil
+	Logger      *slog.Logger        // nil: slog.New(slog.DiscardHandler)
+	Now         func() time.Time    // nil: time.Now
 	ReadyChecks []ReadyCheck
 }
 
 // Server is the gateway's HTTP surface.
 type Server struct {
-	cfg      *config.Config
-	keys     *auth.Store
-	router   router.Router
-	exec     *executor.Executor
-	logger   *slog.Logger
-	now      func() time.Time
-	checks   []ReadyCheck
-	draining atomic.Bool
+	cfg       *config.Config
+	keys      *auth.Store
+	router    router.Router
+	exec      *executor.Executor
+	decisions store.DecisionStore
+	policies  *policy.Registry
+	logger    *slog.Logger
+	now       func() time.Time
+	checks    []ReadyCheck
+	draining  atomic.Bool
 }
 
 // New returns a Server over o.
 func New(o Options) *Server {
 	s := &Server{
-		cfg:    o.Config,
-		keys:   o.Keys,
-		router: o.Router,
-		exec:   o.Executor,
-		logger: o.Logger,
-		now:    o.Now,
-		checks: o.ReadyChecks,
+		cfg:       o.Config,
+		keys:      o.Keys,
+		router:    o.Router,
+		exec:      o.Executor,
+		decisions: o.Decisions,
+		policies:  o.Policies,
+		logger:    o.Logger,
+		now:       o.Now,
+		checks:    o.ReadyChecks,
+	}
+	if s.decisions == nil {
+		s.decisions = store.NewRing(defaultDecisionCapacity)
 	}
 	if s.logger == nil {
 		s.logger = slog.New(slog.DiscardHandler)
@@ -77,6 +91,8 @@ func New(o Options) *Server {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/chat/completions", s.handleChat)
+	mux.HandleFunc("POST /v1/routing/explain", s.handleExplain)
+	mux.HandleFunc("GET /v1/routing/decisions/{id}", s.handleDecision)
 	mux.HandleFunc("GET /v1/models", s.handleModels)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /readyz", s.handleReadyz)

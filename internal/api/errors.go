@@ -30,6 +30,8 @@ const (
 	CodeAccountingUnavailable     = "accounting_unavailable"
 	CodeDeadlineExceeded          = "deadline_exceeded"
 	CodeUpstreamStreamInterrupted = "upstream_stream_interrupted"
+	CodeNotFound                  = "not_found"
+	CodeInternalError             = "internal_error"
 )
 
 // Error is an API failure that maps onto the OpenAI error envelope.
@@ -60,6 +62,9 @@ func errorType(status int) string {
 
 type envelope struct {
 	Error envelopeBody `json:"error"`
+	// Decision is set only by the explain endpoint, for a 503 that still has
+	// a routing decision to show.
+	Decision *router.Decision `json:"decision,omitempty"`
 }
 
 type envelopeBody struct {
@@ -68,12 +73,18 @@ type envelopeBody struct {
 	Code    string `json:"code"`
 }
 
-func (e *Error) envelope() ([]byte, error) {
-	return json.Marshal(envelope{Error: envelopeBody{
-		Message: e.Message,
-		Type:    errorType(e.Status),
-		Code:    e.Code,
-	}})
+func (e *Error) envelope() ([]byte, error) { return e.envelopeWith(nil) }
+
+// envelopeWith renders e, plus d when it is not nil.
+func (e *Error) envelopeWith(d *router.Decision) ([]byte, error) {
+	return json.Marshal(envelope{
+		Error: envelopeBody{
+			Message: e.Message,
+			Type:    errorType(e.Status),
+			Code:    e.Code,
+		},
+		Decision: d,
+	})
 }
 
 // retryAfterSeconds renders d as whole seconds, rounded up, minimum 1.
@@ -86,8 +97,12 @@ func retryAfterSeconds(d time.Duration) string {
 }
 
 // writeError writes e as a JSON error response.
-func writeError(w http.ResponseWriter, e *Error) {
-	body, err := e.envelope()
+func writeError(w http.ResponseWriter, e *Error) { writeErrorWith(w, e, nil) }
+
+// writeErrorWith writes e as a JSON error response that also carries d when d
+// is not nil.
+func writeErrorWith(w http.ResponseWriter, e *Error, d *router.Decision) {
+	body, err := e.envelopeWith(d)
 	if err != nil {
 		// Unreachable: the envelope holds only strings. Fail closed anyway.
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -124,6 +139,8 @@ func fromRouterError(err error) *Error {
 		return &Error{Status: http.StatusForbidden, Code: CodeModelNotAllowed, Message: err.Error()}
 	case errors.Is(err, router.ErrNoEligibleModel):
 		return &Error{Status: http.StatusServiceUnavailable, Code: CodeNoEligibleModel, Message: err.Error(), RetryAfter: time.Second}
+	case errors.Is(err, router.ErrOverloaded):
+		return &Error{Status: http.StatusServiceUnavailable, Code: CodeOverloaded, Message: err.Error(), RetryAfter: time.Second}
 	}
 	return &Error{Status: http.StatusBadGateway, Code: CodeUpstreamError, Message: "routing failed"}
 }

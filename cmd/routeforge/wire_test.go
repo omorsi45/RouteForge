@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -273,5 +275,162 @@ func TestServeRequiresConfigFlag(t *testing.T) {
 	}
 	if !strings.Contains(errb.String(), "--config is required") {
 		t.Fatalf("stderr %q", errb.String())
+	}
+}
+
+// poolPolicyNames are the models of the committed policy, in pool order.
+var poolPolicyNames = []string{
+	"gpt-5",
+	"claude-sonnet-4",
+	"gemini-2.5-pro",
+	"gemini-2.5-flash",
+	"deepseek-v3.1-terminus",
+	"qwen3-235b-a22b-2507",
+}
+
+const (
+	committedPolicy = "../../trainer/artifacts/policy.json"
+	pricesFile      = "../../deploy/prices.yaml"
+)
+
+// parsePoolConfig returns a configuration with one model per policy name,
+// served by a fake provider. Each model is named prefix+policyName.
+func parsePoolConfig(t *testing.T, prefix string, policyNames ...string) *config.Config {
+	t.Helper()
+	var b strings.Builder
+	b.WriteString(`
+tenants:
+  - name: tenant-a
+    api_key_sha256:
+      - aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+providers:
+  - name: fk
+    type: fake
+models:
+`)
+	for _, name := range policyNames {
+		fmt.Fprintf(&b, "  - name: %s%s\n    provider: fk\n    policy_name: %s\n", prefix, name, name)
+	}
+	cfg, err := config.Parse([]byte(b.String()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
+
+func TestBuildRegistry(t *testing.T) {
+	t.Run("loads and activates the configured policy", func(t *testing.T) {
+		cfg := parsePoolConfig(t, "", poolPolicyNames...)
+		cfg.Policy.Path = committedPolicy
+		reg, err := buildRegistry(cfg)
+		if err != nil {
+			t.Fatalf("buildRegistry: %v", err)
+		}
+		active := reg.Active()
+		if active == nil {
+			t.Fatal("no active policy")
+		}
+		if !regexp.MustCompile(`^[0-9a-f]{12}$`).MatchString(active.Version) {
+			t.Errorf("version = %q, want 12 lowercase hex characters", active.Version)
+		}
+		acts := reg.Activations()
+		if len(acts) != 1 || acts[0].Version != active.Version || acts[0].Actor != "startup" || acts[0].Previous != "" {
+			t.Errorf("activations = %+v, want one startup activation of %s", acts, active.Version)
+		}
+	})
+
+	t.Run("models map to the policy through policy_name", func(t *testing.T) {
+		cfg := parsePoolConfig(t, "m-", poolPolicyNames...)
+		cfg.Policy.Path = committedPolicy
+		reg, err := buildRegistry(cfg)
+		if err != nil {
+			t.Fatalf("buildRegistry: %v", err)
+		}
+		if reg.Active() == nil {
+			t.Fatal("no active policy")
+		}
+	})
+
+	t.Run("no policy path gives an empty registry", func(t *testing.T) {
+		reg, err := buildRegistry(parsePoolConfig(t, "", poolPolicyNames...))
+		if err != nil {
+			t.Fatalf("buildRegistry: %v", err)
+		}
+		if reg == nil || reg.Active() != nil || len(reg.List()) != 0 {
+			t.Fatalf("registry = %+v, want an empty one", reg)
+		}
+	})
+
+	t.Run("unreadable policy", func(t *testing.T) {
+		cfg := parsePoolConfig(t, "", poolPolicyNames...)
+		cfg.Policy.Path = filepath.Join(t.TempDir(), "absent.json")
+		if _, err := buildRegistry(cfg); err == nil || !strings.Contains(err.Error(), "read policy") {
+			t.Fatalf("err = %v, want a read error", err)
+		}
+	})
+
+	t.Run("policy model without a configured model", func(t *testing.T) {
+		cfg := parsePoolConfig(t, "", poolPolicyNames[:5]...)
+		cfg.Policy.Path = committedPolicy
+		_, err := buildRegistry(cfg)
+		if err == nil || !strings.Contains(err.Error(), "qwen3-235b-a22b-2507") {
+			t.Fatalf("err = %v, want one naming the missing model", err)
+		}
+	})
+}
+
+func TestPolicyReadyCheck(t *testing.T) {
+	cfg := parsePoolConfig(t, "", poolPolicyNames...)
+	reg, err := buildRegistry(cfg) // no policy path: nothing is active
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := policyReadyCheck(reg)
+	if check.Name != "policy" {
+		t.Errorf("Name = %q, want policy", check.Name)
+	}
+	if err := check.Check(context.Background()); err == nil || err.Error() != "no active policy" {
+		t.Fatalf("Check with no active policy = %v, want the fixed text \"no active policy\"", err)
+	}
+
+	cfg.Policy.Path = committedPolicy
+	if reg, err = buildRegistry(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := policyReadyCheck(reg).Check(context.Background()); err != nil {
+		t.Errorf("Check with an active policy = %v, want nil", err)
+	}
+}
+
+func TestServeStartupFailuresCloseListener(t *testing.T) {
+	cases := []struct {
+		name string
+		edit func(t *testing.T, cfg *config.Config)
+		want string
+	}{
+		{"unpriced model", func(*testing.T, *config.Config) {}, "no price"},
+		{"unreadable policy", func(t *testing.T, cfg *config.Config) {
+			cfg.Pricing.File = pricesFile
+			cfg.Policy.Path = filepath.Join(t.TempDir(), "absent.json")
+		}, "read policy"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := parsePoolConfig(t, "", poolPolicyNames...)
+			tc.edit(t, cfg)
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = ln.Close() })
+
+			err = serve(context.Background(), cfg, ln, func(string) string { return "" }, slog.New(slog.DiscardHandler))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("serve = %v, want an error containing %q", err, tc.want)
+			}
+			if _, err := ln.Accept(); !errors.Is(err, net.ErrClosed) {
+				t.Fatalf("Accept after failed serve = %v, want net.ErrClosed", err)
+			}
+		})
 	}
 }

@@ -16,28 +16,61 @@ import (
 	"github.com/omorsi45/routeforge/internal/config"
 	"github.com/omorsi45/routeforge/internal/executor"
 	"github.com/omorsi45/routeforge/internal/router"
+	"github.com/omorsi45/routeforge/internal/store"
 )
 
-// serve runs the gateway on ln until ctx ends, then drains: /readyz turns
-// 503 and in-flight requests get up to ShutdownTimeout to finish. serve owns
-// ln and closes it on every path.
-func serve(ctx context.Context, cfg *config.Config, ln net.Listener, getenv func(string) string, logger *slog.Logger) error {
+// decisionRingSize is how many routing decisions the gateway keeps for
+// GET /v1/routing/decisions/{id}.
+const decisionRingSize = 10000
+
+// buildGateway constructs the HTTP surface over cfg: providers, prices, the
+// policy registry and the routing engine. Without a policy the engine routes
+// like the basic router.
+func buildGateway(cfg *config.Config, getenv func(string) string, logger *slog.Logger) (*api.Server, error) {
 	// No client Timeout: streams outlive any fixed value, so deadlines come
 	// from request contexts.
 	client := &http.Client{Transport: http.DefaultTransport.(*http.Transport).Clone()}
 	providers, err := buildProviders(cfg, getenv, client)
 	if err != nil {
+		return nil, err
+	}
+	prices, err := modelPrices(cfg)
+	if err != nil {
+		return nil, err
+	}
+	reg, err := buildRegistry(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	opts := api.Options{
+		Config: cfg,
+		Keys:   auth.NewStore(cfg.Tenants),
+		Router: router.NewEngine(router.EngineOptions{
+			Models:   cfg.Models,
+			Prices:   prices,
+			Policies: reg,
+		}),
+		Executor:  executor.New(buildTargets(cfg, providers), nil),
+		Decisions: store.NewRing(decisionRingSize),
+		Policies:  reg,
+		Logger:    logger,
+	}
+	if cfg.Policy.Path != "" {
+		opts.ReadyChecks = []api.ReadyCheck{policyReadyCheck(reg)}
+	}
+	return api.New(opts), nil
+}
+
+// serve runs the gateway on ln until ctx ends, then drains: /readyz turns
+// 503 and in-flight requests get up to ShutdownTimeout to finish. serve owns
+// ln and closes it on every path.
+func serve(ctx context.Context, cfg *config.Config, ln net.Listener, getenv func(string) string, logger *slog.Logger) error {
+	gw, err := buildGateway(cfg, getenv, logger)
+	if err != nil {
 		_ = ln.Close()
 		return err
 	}
-
-	gw := api.New(api.Options{
-		Config:   cfg,
-		Keys:     auth.NewStore(cfg.Tenants),
-		Router:   router.NewBasic(cfg.Models, router.BasicOptions{}),
-		Executor: executor.New(buildTargets(cfg, providers), nil),
-		Logger:   logger,
-	})
 	srv := api.NewHTTPServer(cfg.Server, gw.Handler())
 
 	serveErr := make(chan error, 1)
