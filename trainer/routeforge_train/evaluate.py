@@ -1,4 +1,4 @@
-"""The `evaluate` command: the only reader of the held-out test split (spec 10).
+"""The `evaluate` command: the only reader of the held-out test split.
 
 Nothing is fitted on the test split. `train` supplies the served and offline candidates; the
 test prompts are scored once, every strategy is replayed on the recorded outcomes, and the

@@ -404,7 +404,7 @@ func classify(err error) string {
 }
 
 // outputTokens is the number of completion tokens an attempt produced: what the
-// provider reported, else the spec 11 estimate from the bytes delivered, so a
+// provider reported, else an estimate of one token per four bytes delivered, so a
 // provider that sends no usage does not make the health estimators charge a
 // whole response's decode time to one token.
 func outputTokens(u *provider.Usage, deliveredBytes int) int {

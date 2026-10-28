@@ -1,5 +1,5 @@
 # SIMULATED. Synthetic latency profiles for benchmarks; not measurements of any provider.
-# Rule (spec 8.6): rank pool models by output price ascending (ties: input price, then name), r = 0 for the cheapest;
+# Rule: rank pool models by output price ascending (ties: input price, then name), r = 0 for the cheapest;
 # ttft_ms = 200 + 100r; decode_tokens_per_s = 120 - 15r; jitter is uniform +/-10% from a seeded RNG.
 simulated: true
 seed: 20261026

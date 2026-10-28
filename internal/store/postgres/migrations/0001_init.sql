@@ -1,6 +1,6 @@
--- The first schema (spec section 12). Policies keep their exact bytes next to
+-- The first schema. Policies keep their exact bytes next to
 -- the jsonb copy: jsonb rewrites number text, which would change the version
--- hash (Ruling R9).
+-- hash.
 
 create table schema_migrations (
     version int primary key,

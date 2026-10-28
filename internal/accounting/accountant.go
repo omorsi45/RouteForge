@@ -115,7 +115,7 @@ type AccountantOptions struct {
 
 // Accountant admits requests and meters their attempts: it enforces rate
 // limits, reserves budget before each upstream call and settles the real cost
-// after it (spec 11). It is safe for concurrent use.
+// after it. It is safe for concurrent use.
 type Accountant struct {
 	tenants  map[string]*config.Tenant
 	prices   map[string]Price
@@ -469,8 +469,8 @@ func (c *charge) settle(s Settlement) {
 	}
 }
 
-// billedTokens decides what an attempt is billed for (Ruling R6): the provider's
-// usage whenever it sent one; else, for an attempt that delivered output, an
+// billedTokens decides what an attempt is billed for: the provider's usage
+// whenever it sent one; else, for an attempt that delivered output, an
 // estimate from the prompt and the delivered bytes; else nothing. A call that
 // fails before delivering output is billed zero tokens and its cost source is
 // estimated, because the provider may have charged for it anyway.

@@ -1,7 +1,8 @@
-"""Learn-then-Test certification of the lambda threshold (spec 8.5).
+"""Learn-then-Test certification of the lambda threshold.
 
 Fixed-sequence testing from lambda = 1.00 downward: reject H0 "regret rate > alpha" while
-P(Binomial(n, alpha) <= k_regret) <= delta, and certify the last rejected lambda.
+P(Binomial(n, alpha) <= k_regret) <= delta, and certify the last rejected lambda. The procedure
+is explained in docs/routing.md, "Certification with Learn-then-Test".
 """
 
 from __future__ import annotations

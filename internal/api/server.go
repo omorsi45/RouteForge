@@ -247,12 +247,12 @@ func (w *statusRecorder) Unwrap() http.ResponseWriter { return w.ResponseWriter 
 const statusClientGone = 499
 
 // clientGone reports whether the client left before the handler finished its
-// response (Ruling C11). The request context must have ended with
-// context.Canceled, which net/http does when the connection closes. The
-// gateway's own deadline lives on a context derived from this one and never
-// ends it, so a timeout is not mistaken for a departure. And the handler must
-// have written nothing (written is the status recorded, 0 for none) or left an
-// event stream open; a response that was written whole stays what it was.
+// response. The request context must have ended with context.Canceled, which
+// net/http does when the connection closes. The gateway's own deadline lives on
+// a context derived from this one and never ends it, so a timeout is not
+// mistaken for a departure. And the handler must have written nothing (written
+// is the status recorded, 0 for none) or left an event stream open; a response
+// that was written whole stays what it was.
 func clientGone(ctx context.Context, written int, info *reqInfo) bool {
 	if !errors.Is(ctx.Err(), context.Canceled) {
 		return false

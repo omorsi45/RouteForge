@@ -1,4 +1,4 @@
-"""The `train` command: fit, select, certify, export and report (spec 8 and 9)."""
+"""The `train` command: fit, select, certify, export and report."""
 
 from __future__ import annotations
 

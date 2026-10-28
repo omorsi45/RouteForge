@@ -111,10 +111,10 @@ func (s *Server) serveStream(w http.ResponseWriter, r *http.Request, st *chatSta
 		return
 	}
 	// finish closes the stream, which ends the upstream call and records the
-	// attempt, and only then stores the decision (Ruling C7). It runs before
-	// the last frame is written, so a client that reads the end of the stream
-	// can fetch its decision at once, and from a defer on every other path.
-	// The deferred cancel in handleChat then releases the request context.
+	// attempt, and only then stores the decision, so its attempts are final. It
+	// runs before the last frame is written, so a client that reads the end of
+	// the stream can fetch its decision at once, and from a defer on every other
+	// path. The deferred cancel in handleChat then releases the request context.
 	finish := sync.OnceFunc(func() {
 		if err := stream.Close(); err != nil {
 			s.logger.WarnContext(r.Context(), "close provider stream failed", "request_id", st.reqID, "error", err)

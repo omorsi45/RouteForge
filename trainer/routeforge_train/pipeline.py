@@ -1,4 +1,4 @@
-"""Fit, select and certify the routing candidates (spec 8.2 to 8.5).
+"""Fit, select and certify the routing candidates.
 
 Shared by the `train` command and the leave-one-dataset-out runs. Data isolation is
 structural: `fit_pipeline` sees the train and calibration tables only, `select_served` sees
@@ -236,7 +236,7 @@ def routing_metrics(
 
 
 def select_served(fitted: Fitted, calibration: OutcomeTable, prices: PriceTable) -> Selection:
-    """Pick the served predictor type on the calibration split alone (spec 8.5, step 3).
+    """Pick the served predictor type on the calibration split alone.
 
     Each served type is certified for the balanced profile on the calibration table, routed at
     that lambda, and compared by recorded cost per success; ties go to `lr`.

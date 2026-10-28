@@ -116,7 +116,9 @@ type StaticRulesDoc struct {
 	DefaultFamily  string              `json:"default_family"`
 }
 
-// ProfileDoc is one certified routing profile (spec 8.5).
+// ProfileDoc is one routing profile with its certified threshold: the target
+// regret rate Alpha, the confidence Delta, the Lambda that the trainer
+// certified, and the certification evidence behind it.
 type ProfileDoc struct {
 	Name       string  `json:"name"`
 	Alpha      float64 `json:"alpha"`

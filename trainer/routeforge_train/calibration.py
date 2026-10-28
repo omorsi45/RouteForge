@@ -1,7 +1,8 @@
-"""Isotonic-binned calibration with Wilson lower bounds (spec 8.3).
+"""Isotonic-binned calibration with Wilson lower bounds.
 
 Serving maps a raw score to a block by binary search with no interpolation; Go reimplements
-`Calibration.lookup`, so every comparison here is exact (integers or `Fraction`).
+`Calibration.lookup`, so every comparison here is exact (integers or `Fraction`). The method is
+explained in docs/routing.md, "Calibration and lower bounds".
 """
 
 from __future__ import annotations
@@ -92,7 +93,7 @@ def _merge_target(blocks: list[list], i: int) -> int:
 def fit_calibration(
     raw: np.ndarray, success: np.ndarray, min_block: int = MIN_BLOCK
 ) -> Calibration:
-    """Weighted PAV over distinct raw scores, then merge undersized blocks (spec 8.3)."""
+    """Weighted PAV over distinct raw scores, then merge undersized blocks."""
     order = np.argsort(raw, kind="stable")
     xs, ys = raw[order], success[order].astype(np.int64)
     uniq, start = np.unique(xs, return_index=True)  # identical raw scores never split

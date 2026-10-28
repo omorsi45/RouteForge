@@ -22,12 +22,13 @@ import (
 	"github.com/omorsi45/routeforge/internal/config"
 )
 
-// These tests check the accounting invariants of spec 11 against the real
-// gateway, built by buildGateway exactly as serve builds it, under fault
-// injection. Fake providers fail calls, answer 429, cut streams short and leave
-// usage out, and the client abandons some streams after their first frame.
-// Every request has returned, and every handler with it, when the books are
-// read, and each invariant must hold whatever interleaving the faults fell in.
+// These tests check the four accounting invariants (listed under "Accounting"
+// in docs/operations.md) against the real gateway, built by buildGateway
+// exactly as serve builds it, under fault injection. Fake providers fail
+// calls, answer 429, cut streams short and leave usage out, and the client
+// abandons some streams after their first frame. Every request has returned,
+// and every handler with it, when the books are read, and each invariant must
+// hold whatever interleaving the faults fell in.
 //
 // The providers sleep 1ms per token, so a 16 token stream lasts about 16ms: long
 // enough for a client that abandons it after the first frame to leave it
@@ -610,7 +611,7 @@ func TestInvariantPartialStreamSettles(t *testing.T) {
 		t.Fatalf("got %d usage records, want exactly one for the one attempt: %+v", len(recs), recs)
 	}
 	rec := recs[0]
-	// R6: no usage arrived, so the attempt is billed ceil(prompt_bytes/4) prompt
+	// No usage arrived, so the attempt is billed ceil(prompt_bytes/4) prompt
 	// tokens and ceil(delivered_bytes/4) completion tokens. The model costs
 	// 1000 nano-USD per input token and 2000 per output token.
 	wantPrompt := (len(prompt) + 3) / 4

@@ -1,4 +1,4 @@
-"""Simulated latency profiles (spec 8.6): synthetic, not measurements of any provider."""
+"""Simulated latency profiles: synthetic, not measurements of any provider."""
 
 from __future__ import annotations
 

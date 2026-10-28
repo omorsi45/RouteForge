@@ -16,8 +16,8 @@ import (
 
 type labels = map[string]string
 
-// wantLabelNames are the exact families of spec 14 and 11 with their sorted
-// label names.
+// wantLabelNames are the exact families listed under "Metrics" in
+// docs/operations.md, with their sorted label names.
 var wantLabelNames = map[string][]string{
 	"routeforge_requests_total":             {"model", "policy_version", "profile", "status", "strategy"},
 	"routeforge_route_decisions_total":      {"model", "policy_version", "reason", "strategy"},

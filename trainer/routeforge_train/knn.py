@@ -1,4 +1,4 @@
-"""Per-model k-nearest-neighbor predictor (spec 8.2). Evaluated offline only, never served."""
+"""Per-model k-nearest-neighbor predictor. Evaluated offline only, never served."""
 
 from __future__ import annotations
 

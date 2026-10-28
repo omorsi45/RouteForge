@@ -32,7 +32,7 @@ const (
 var poolNames = []string{gpt5, sonnet, pro, flash, deepseek, qwen}
 
 // fixedPredictor scores every prompt the same. The calibration of each test
-// model has a single block, so p and lcb come straight from the spec.
+// model has a single block, so p and lcb come straight from its modelSpec.
 type fixedPredictor float64
 
 func (f fixedPredictor) Raw(*policy.Features, *[8]float64) float64 { return float64(f) }
@@ -769,9 +769,9 @@ func TestEnginePinnedIneligible(t *testing.T) {
 	}
 }
 
-// A pinned request has one candidate, so a full queue for it is the case spec
-// 10 calls overloaded: the model is fine, the gateway is busy. It is not "no
-// eligible model", which tells the client to pick another model.
+// A pinned request has one candidate, so a full queue for it is an overload:
+// the model is fine, the gateway is busy. It is not "no eligible model", which
+// tells the client to pick another model.
 func TestEnginePinnedQueueFullIsOverloaded(t *testing.T) {
 	pinned := func() *router.Request {
 		req := autoReq("", "strict")

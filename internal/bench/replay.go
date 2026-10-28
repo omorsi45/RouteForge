@@ -40,7 +40,7 @@ func (g replayGroup) label() string {
 // deterministic reports whether the group's decisions are a pure function of
 // the request and the policy, which is what parity checks: the gateway must
 // implement the offline decision function. Latency is the one that is not. Its
-// gateway estimates move with every attempt the gateway observes (spec 8.6),
+// gateway estimates move with every attempt the gateway observes,
 // while the offline router uses the frozen simulated priors, so the two are
 // different functions once the gateway has served traffic.
 func (g replayGroup) deterministic() bool { return g.strategy != "latency" }

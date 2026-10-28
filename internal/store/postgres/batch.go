@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-// Defaults of the batching writer (spec 12).
+// Defaults of the batching writer.
 const (
 	defaultBatchSize     = 500
 	defaultFlushInterval = 200 * time.Millisecond

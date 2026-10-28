@@ -207,7 +207,7 @@ func (s *Server) logActivation(r *http.Request, a policy.Activation) {
 // adminAccounting is the answer of GET /admin/accounting: what a tenant spent,
 // holds in reservations and went over its budget by on a UTC day, and what its
 // usage records add up to. The benchmark checks the accounting invariants
-// through it (Ruling R10).
+// through it.
 type adminAccounting struct {
 	Tenant         string  `json:"tenant"`
 	Day            string  `json:"day"`

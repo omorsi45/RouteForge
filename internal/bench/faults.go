@@ -207,8 +207,8 @@ type TenantAccounting struct {
 	BudgetNanos int64 `json:"budget_nanos"`
 }
 
-// Invariants are the accounting checks of spec 11, made on the books the
-// gateway reports after the run. InvariantsHold is true when all of them are.
+// Invariants are the four accounting checks, made on the books the gateway
+// reports after the run. InvariantsHold is true when all of them are.
 type Invariants struct {
 	// SpentEqualsUsage (a): each tenant's spend equals the sum of its usage
 	// records.

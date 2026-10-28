@@ -9,7 +9,7 @@ import (
 // Sources of a token count and of the cost computed from it.
 const (
 	SourceReported  = "reported"  // the provider sent usage
-	SourceEstimated = "estimated" // counted from bytes (spec 11)
+	SourceEstimated = "estimated" // counted from bytes, one token per four
 )
 
 // UsageRecord is the bill of one upstream attempt. It never holds prompt or

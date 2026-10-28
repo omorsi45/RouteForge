@@ -10,8 +10,9 @@ import (
 // bench/latency_profiles.yaml.
 const defaultReplaySeed = 20261026
 
-// applyDefaults fills the unset reliability fields with the values of spec
-// section 10 and Ruling R5 (the retry budget floor).
+// applyDefaults fills the unset reliability fields with the defaults listed
+// under "reliability" in docs/operations.md. The retry budget floor of 3 lets an
+// isolated request fail over.
 func (r *Reliability) applyDefaults() {
 	if r.MaxAttempts == 0 {
 		r.MaxAttempts = 3

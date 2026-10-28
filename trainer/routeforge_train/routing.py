@@ -1,7 +1,8 @@
-"""Offline routing rules (spec 8.4): the quality decision rule and the reference strategies.
+"""Offline routing rules: the quality decision rule and the reference strategies.
 
-Go reimplements `route_quality` in milestone 3, so tie handling is fixed here: candidates are
-ordered by expected cost with ties kept in pool order, and the first with lcb >= lambda wins.
+The Go gateway reimplements `route_quality` (`internal/router/engine.go`), so tie handling is
+fixed here: candidates are ordered by expected cost with ties kept in pool order, and the first
+with lcb >= lambda wins.
 """
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""Per-model logistic regression predictor (spec 8.2).
+"""Per-model logistic regression predictor (docs/routing.md, "Predictors").
 
 Fitting happens on the compact design matrix (vocabulary columns plus the eight dense
 columns); serving scores the hashed block through the retained sparse weights.

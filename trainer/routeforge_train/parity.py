@@ -1,4 +1,4 @@
-"""Parity fixtures for the Go gateway (spec 8.1).
+"""Parity fixtures for the Go gateway.
 
 Each line pins one synthetic request: its feature text, hashed and dense features, the exported
 policy's per-model scores and the routing decision of every profile. Scores always come from

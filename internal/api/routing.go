@@ -9,7 +9,7 @@ import (
 // handleExplain shows how a request would be routed. It reads the request the
 // way chat does, with the same authentication, headers and body rules, and
 // runs the router, but it never calls a provider and never stores the
-// decision (Ruling R10): the decision is returned, not recorded.
+// decision: the decision is returned, not recorded.
 func (s *Server) handleExplain(w http.ResponseWriter, r *http.Request) {
 	info := infoFrom(r.Context())
 	call, aerr := s.readChat(w, r)

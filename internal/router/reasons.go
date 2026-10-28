@@ -16,7 +16,7 @@ const (
 	// ReasonLatency: the latency strategy's pick, by predicted p95.
 	ReasonLatency = "lowest_latency"
 	// ReasonPickIneligible: a strategy's own pick was ineligible, so the
-	// eligible candidate with the highest p was chosen (Ruling R4).
+	// eligible candidate with the highest p was chosen.
 	ReasonPickIneligible = "strategy_pick_ineligible"
 )
 

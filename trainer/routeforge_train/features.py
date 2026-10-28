@@ -1,8 +1,8 @@
-"""Shared feature extraction (spec 8.1).
+"""Shared feature extraction.
 
 These definitions are a byte-for-byte contract with the Go gateway
 (`internal/policy/features.go`), pinned by `testdata/parity/features.jsonl`.
-Do not change them without changing both sides.
+Do not change them without changing both sides. They are explained in docs/routing.md, "Features".
 """
 
 import hashlib

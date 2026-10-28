@@ -21,7 +21,7 @@ type BudgetState struct {
 	Reserved int64 // held back for calls still running
 	// Overshoot is how far settled spend went beyond the limit: actual charges
 	// are never clipped, so a call that costs more than was reserved can push
-	// Spent over it (Ruling R7).
+	// Spent over it. BudgetStore.Settle says how each charge adds to it.
 	Overshoot int64
 }
 

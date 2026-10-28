@@ -35,8 +35,9 @@ func (c *fakeClock) Advance(d time.Duration) {
 	c.t = c.t.Add(d)
 }
 
-// specBreaker is the default breaker of spec 10.
-func specBreaker() BreakerConfig {
+// defaultBreakerConfig is the breaker configuration with the documented
+// defaults (docs/operations.md, "reliability").
+func defaultBreakerConfig() BreakerConfig {
 	return BreakerConfig{
 		ConsecutiveFailures: 5,
 		ErrorRate:           0.5,
@@ -49,10 +50,11 @@ func specBreaker() BreakerConfig {
 
 const model = "m"
 
-// newBreakers returns breakers over the spec defaults and the clock they read.
+// newBreakers returns breakers over the default configuration and the clock
+// they read.
 func newBreakers() (*Breakers, *fakeClock) {
 	clk := newFakeClock()
-	return NewBreakers(specBreaker(), clk.Now), clk
+	return NewBreakers(defaultBreakerConfig(), clk.Now), clk
 }
 
 // run sends one request through the breaker of model and reports its outcome.
@@ -376,7 +378,7 @@ func TestTicketCancelOnRejectedTicketIsNoop(t *testing.T) {
 }
 
 func TestNewBreakersDefaultsClock(t *testing.T) {
-	b := NewBreakers(specBreaker(), nil)
+	b := NewBreakers(defaultBreakerConfig(), nil)
 	run(t, b, model, true)
 	wantState(t, b, model, StateClosed)
 }
